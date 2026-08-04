@@ -1,0 +1,31 @@
+# Secrets and local config
+.env
+.env.*
+*.key
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Django runtime data
+db.sqlite3
+db.sqlite3-journal
+logs/
+media/
+staticfiles/
+
+# Generated evaluation reports
+eval/reports/*.json
+eval/reports/*.pdf
+eval/reports/*.png
+
+# Model/vector caches
+cache/
+*.faiss

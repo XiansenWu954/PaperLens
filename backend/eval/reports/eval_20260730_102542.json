@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "id": "q01",
+      "type": "factual",
+      "question": "Transformer 的核心注意力机制是什么？",
+      "paperlens": {
+        "recall_at_10": 0.0,
+        "faithfulness": 0.8,
+        "coverage": 1.0,
+        "n_sources": 46,
+        "report_len": 4838
+      }
+    }
+  ],
+  "summary": {
+    "paperlens": {
+      "recall": 0.0,
+      "faithfulness": 0.8,
+      "coverage": 1.0
+    },
+    "baseline": null
+  }
+}

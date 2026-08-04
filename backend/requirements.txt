@@ -1,0 +1,24 @@
+# PaperLens backend dependencies
+# 地基依赖，后续 change 按需追加（langchain/langgraph/chromadb/cdlib 等）
+Django>=4.2,<5.1
+daphne
+djangorestframework
+django-cors-headers
+dj-database-url
+psycopg[binary]
+pgvector
+celery[redis]
+redis
+openai>=1.0
+litellm
+pydantic>=2
+httpx
+networkx
+python-dotenv
+langgraph
+langchain-core
+aiohttp
+pypdf
+sentence-transformers
+numpy
+mcp
