@@ -114,17 +114,28 @@ async def research_stream(request, task_id: int):
             )
             raise
         except Exception as e:
-            logger.exception(
+            # §30.3: no logger.exception (raw exception message).
+            from agent.events import error_hash
+
+            logger.error(
                 "agent stream failed",
                 extra={
                     "event": "agent_stream_failed",
                     "task_id": task_id,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                     "error": e.__class__.__name__,
+                    "error_hash": error_hash(e),
                 },
             )
-            await _mark_error(task, str(e))
-            yield _sse("error", {"message": str(e)})
+            # §32.1: ResearchTask.error_message stores the stable code only —
+            # the raw exception message is never persisted.
+            await _mark_error(task, f"{e.__class__.__name__}: research task failed")
+            # §31.1: the SSE error surface carries the stable code + fixed
+            # copy — the raw exception message is never serialized.
+            yield _sse("error", {
+                "message": "服务暂时不可用，请稍后重试。",
+                "error": e.__class__.__name__,
+            })
         finally:
             reset_task_id(stream_task_token)
             reset_request_id(stream_request_token)
@@ -176,6 +187,5 @@ async def _mark_error(task: ResearchTask, msg: str) -> None:
             "event": "research_marked_error",
             "task_id": task.id,
             "task_status": task.status,
-            "error_preview": task.error_message[:160],
         },
     )

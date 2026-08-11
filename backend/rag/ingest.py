@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -81,8 +82,81 @@ def download_pdf(url: str, timeout: float = 60.0, max_retries: int = 2) -> bytes
 
 
 def parse_pdf_pages(pdf_bytes: bytes) -> tuple[str, list[PageText]]:
-    """Extract page text and global character ranges from a PDF."""
+    """Extract page text and global character ranges from a PDF.
 
+    优先用 Docling（布局/表格/公式感知，适合学术论文双栏）；
+    Docling 不可用或解析为空时 fallback 到 pypdf（轻量纯文本兜底）。
+    两者都返回 (full_text, list[PageText])，PageText 维护全局字符游标供 chunk 定位页码。
+    """
+    text, pages = _parse_pdf_with_docling(pdf_bytes)
+    if text.strip():
+        return text, pages
+    logger.info("docling 解析为空或失败，回退到 pypdf", extra={"event": "pdf_parse_fallback_pypdf"})
+    return _parse_pdf_with_pypdf(pdf_bytes)
+
+
+def _parse_pdf_with_docling(pdf_bytes: bytes) -> tuple[str, list[PageText]]:
+    """用 Docling 解析，按页拼接文本并维护字符偏移。失败时返回空。"""
+    try:
+        from docling.document_converter import DocumentConverter
+    except Exception as exc:
+        logger.info("docling 未安装，跳过", extra={"event": "pdf_parse_docling_missing", "error": exc.__class__.__name__})
+        return "", []
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+    try:
+        conv = DocumentConverter()
+        result = conv.convert(tmp_path)
+        doc = result.document
+        full_text = doc.export_to_markdown().strip()
+        if not full_text:
+            return "", []
+        # Docling 不直接给逐页文本，按页号切分（用 page items 若可用，否则整篇作单页）
+        pages: list[PageText] = []
+        try:
+            page_items = list(doc.iterate_items()) if hasattr(doc, "iterate_items") else []
+            # 若能拿到页号，按页聚合；否则整篇归第 1 页
+            per_page: dict[int, list[str]] = {}
+            for item in page_items:
+                page_no = getattr(item, "page_no", 1) or 1
+                txt = getattr(item, "text", None) or ""
+                if txt.strip():
+                    per_page.setdefault(page_no, []).append(txt.strip())
+            cursor = 0
+            parts: list[str] = []
+            for page_no in sorted(per_page):
+                page_text = "\n".join(per_page[page_no])
+                if parts:
+                    parts.append("\n\n")
+                    cursor += 2
+                start = cursor
+                parts.append(page_text)
+                cursor += len(page_text)
+                pages.append(PageText(page=page_no, text=page_text, char_start=start, char_end=cursor))
+            full_text = "".join(parts)
+        except Exception:
+            # 退化为整篇归一页
+            pages = [PageText(page=1, text=full_text, char_start=0, char_end=len(full_text))]
+        return full_text, pages
+    except Exception as exc:
+        logger.warning(
+            "docling 解析失败",
+            extra={"event": "pdf_parse_docling_failed", "error": exc.__class__.__name__},
+        )
+        return "", []
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _parse_pdf_with_pypdf(pdf_bytes: bytes) -> tuple[str, list[PageText]]:
+    """pypdf 兜底解析（纯文本，不感知布局）。"""
     import pypdf
 
     reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -202,13 +276,18 @@ async def ingest_paper(paper) -> int:
     try:
         count = await ingest_pdf_bytes(paper, pdf_bytes, skip_existing=False, replace_existing=True)
     except Exception as exc:
-        logger.exception(
+        # §31.1: exception type + digest + safe frames — never the message.
+        from agent.events import error_hash, safe_stack_frames
+
+        logger.error(
             "paper PDF ingest failed",
             extra={
                 "event": "paper_pdf_ingest_failed",
                 "paper_id": paper.id,
                 "status": "error",
                 "error": exc.__class__.__name__,
+                "error_hash": error_hash(exc),
+                "stack_frames": safe_stack_frames(exc),
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
             },
         )
@@ -278,10 +357,20 @@ async def ingest_text(
     if not chunks:
         return 0
 
-    vectors = await sync_to_async(embed, thread_sensitive=False)(
-        [chunk.content for chunk in chunks],
-        input_type="document",
-    )
+    # 若 provider 支持 sparse（BGE-M3），同时编码 dense + sparse 词级权重
+    from .embedding import get_provider
+    provider = get_provider()
+    sparse_list: list[dict[str, float]] = []
+    if hasattr(provider, "encode_dense_sparse"):
+        vectors_arr, sparse_list = await sync_to_async(provider.encode_dense_sparse, thread_sensitive=False)(
+            [chunk.content for chunk in chunks]
+        )
+        vectors = vectors_arr
+    else:
+        vectors = await sync_to_async(embed, thread_sensitive=False)(
+            [chunk.content for chunk in chunks],
+            input_type="document",
+        )
     meta = embedding_metadata()
     docname_prefix = (paper.title[:32] if paper.title else f"paper{paper.id}") + str(paper.year or "")
     from .citations import make_citation_key_for_paper
@@ -309,6 +398,7 @@ async def ingest_text(
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 search_vector=_search_document(chunk.content, paper),
+                sparse_weights=sparse_list[i] if i < len(sparse_list) else {},
                 citation_key=citation_key,
                 indexed_at=indexed_at,
             )

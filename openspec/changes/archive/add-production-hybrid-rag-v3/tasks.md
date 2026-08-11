@@ -1,0 +1,33 @@
+# Tasks
+
+- [x] Add Docker Compose for pgvector Postgres, Redis, backend, Celery worker, and frontend.
+- [x] Add env-driven Django database, Celery, media, and RAG configuration.
+- [x] Add pgvector-compatible RAG Text field and hybrid retrieval metadata.
+- [x] Add Qwen3 embedding provider abstraction with fake provider for tests.
+- [x] Implement dense + lexical + RRF hybrid retrieval while preserving `query_project_rag`.
+- [x] Add PDF upload/url ingestion endpoints and `PaperIngestionJob`.
+- [x] Add Celery task for PDF parsing, chunking, embedding, persistence, and events.
+- [x] Add Evidence Board upload and ingestion controls.
+- [x] Add bounded LangGraph research expansion workflow and API endpoint.
+- [x] Add 30+ deterministic RAG quality evaluation command.
+- [x] Run `python manage.py check`.
+  - Result: passed.
+- [x] Run backend tests.
+  - Result: `python manage.py test api realtime papers datasources rag citation agent mcp_server eval --noinput` passed with 169 tests.
+- [x] Run `python manage.py evaluate_rag_quality --write-report`.
+  - Result: 32/32 cases passed, Recall@5 1.0, MRR 0.977, Context Precision 0.6207, Citation Coverage 1.0, Faithfulness 1.0, Unsupported Claim Rate 0.0, average retrieval latency 17.29 ms.
+  - Report: `backend/eval/reports/rag_quality_20260803_211220.json`.
+- [x] Run `npm run build`.
+  - Result: passed.
+- [x] Update README/docs with latest metrics and Docker workflow.
+  - Result: README and handoff docs updated.
+- [x] Verify Docker Compose runtime.
+  - Result: `docker compose up --build -d backend celery-worker frontend` passed; backend, Celery worker, frontend, Postgres, and Redis are running.
+- [x] Verify Postgres/pgvector behavior.
+  - Result: pgvector extension, vector column, HNSW index, and FTS GIN index verified. Postgres-backed RAG eval passed in `backend/eval/reports/rag_quality_20260803_204434.json`.
+- [x] Verify real Qwen3 local embedding.
+  - Result: Docker backend loaded `Qwen/Qwen3-Embedding-0.6B`, produced normalized 1024-d query/document vectors, cold load + first encode 129510.61 ms on CPU.
+- [x] Verify real DeepSeek output quality.
+  - Result: `evaluate_live_agent --include-network --write-report` passed 10/10 cases with average critic score 0.895; live PDF/RAG critic score 0.95.
+- [x] Re-run final regression after fixes.
+  - Result: `python manage.py test api realtime papers datasources rag citation agent mcp_server eval --noinput` passed with 169 tests; `evaluate_agent_quality --write-report` score 1.0; secret scan found no `sk-...` keys.

@@ -44,8 +44,15 @@ async def eval_one(item, run_baseline: bool) -> dict:
             "report_len": len(pl["report"]),
         }
     except Exception as e:
-        logger.exception("paperlens 失败 %s", item.id)
-        result["paperlens"] = {"error": str(e)[:200]}
+        # §31.1/§32.4: eval artifacts never carry raw exception text.
+        from .safe_error import exception_record
+
+        logger.error(
+            "paperlens failed",
+            extra={"event": "eval_paperlens_failed", "item_id": item.id,
+                   **exception_record(e)},
+        )
+        result["paperlens"] = exception_record(e)
 
     # baseline
     if run_baseline:
@@ -59,8 +66,14 @@ async def eval_one(item, run_baseline: bool) -> dict:
                 "report_len": len(bl["report"]),
             }
         except Exception as e:
-            logger.exception("baseline 失败 %s", item.id)
-            result["baseline"] = {"error": str(e)[:200]}
+            from .safe_error import exception_record
+
+            logger.error(
+                "baseline failed",
+                extra={"event": "eval_baseline_failed", "item_id": item.id,
+                       **exception_record(e)},
+            )
+            result["baseline"] = exception_record(e)
 
     return result
 

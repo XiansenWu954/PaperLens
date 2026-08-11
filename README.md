@@ -15,9 +15,12 @@ pgvector, Redis, Celery, and a lightweight tool orchestration layer.
 - PDF upload and ingestion with page, section, and character-offset metadata.
 - Hybrid retrieval using pgvector dense search, PostgreSQL full-text search, and
   Reciprocal Rank Fusion.
-- Project chat that can query indexed evidence, search for additional papers,
-  update the project library, refresh citation data, and draft report sections.
-- Citation map for project-level paper relationships.
+- Project chat powered by a **ReAct agent loop**: the LLM autonomously decides
+  which tools to call, in what order, and how many times (read evidence, search,
+  add papers, compare, read sections, build citation map, draft reports, export
+  BibTeX) — while a deterministic safety layer blocks destructive operations and
+  verifies every citation.
+- Citation map for project-level paper relationships, embedded inline in chat.
 - Report studio with report versions and source-marker checks.
 - Background jobs for ingestion and longer research workflows.
 - Structured backend logs with request IDs, task IDs, run events, durations, and
@@ -61,7 +64,12 @@ docker-compose.yml
 - Docker Desktop, for the Postgres/Redis demo stack
 - A DeepSeek-compatible API key for live model calls
 
-Local tests can run without a model key by using the fake embedding provider and
+A DeepSeek API key is **required** for Agent Chat answers, report section
+drafting, and RAG reranking. Without a key the service still starts and can
+serve pure retrieval/paper-library operations, but any LLM-dependent call
+returns a clear "未配置 DEEPSEEK_API_KEY" message instead of crashing.
+
+Local tests run without a model key by using the fake embedding provider and
 deterministic fixtures.
 
 ## Quick Start
@@ -113,9 +121,11 @@ npm run dev -- --host 0.0.0.0
 
 ## Configuration
 
-Important settings are defined in `.env.example`:
+Important settings are defined in `.env.example`. Copy it to `.env` and fill in
+your own values:
 
 ```text
+DJANGO_SECRET_KEY=change-me-for-non-local-use
 DATABASE_URL=postgres://paperlens:paperlens@postgres:5432/paperlens
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/1
@@ -131,8 +141,25 @@ PAPERLENS_RAG_FINAL_K=8
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
+Key configuration notes:
+
+- `DEEPSEEK_API_KEY` — your DeepSeek API key. Required for LLM features (Agent
+  Chat, report drafting, RAG reranking). Without it the service starts but LLM
+  calls return a friendly configuration hint.
+- `DJANGO_SECRET_KEY` — set a strong random value for any non-local deployment.
+- `PAPERLENS_EMBEDDING_PROVIDER=fake` — use the deterministic hash embedding for
+  offline tests and no-network demos (no model download needed).
+
+You can check configuration readiness at any time:
+
+```text
+GET http://127.0.0.1:8000/
+# -> {"status":"ok","service":"PaperLens","version":"0.3.0","config":{"deepseek_key_configured":true,"embedding_provider":"bge-m3","database":"postgres"}}
+```
+
 Do not commit `.env`, API keys, raw paper dumps, local logs, or generated live
-evaluation reports.
+evaluation reports. If an API key is ever leaked, rotate it immediately in the
+provider dashboard.
 
 ## API Overview
 
@@ -147,6 +174,8 @@ Project endpoints:
 - `GET|POST /api/projects`
 - `GET|PATCH|DELETE /api/projects/<id>`
 - `GET|POST /api/projects/<id>/papers`
+- `POST /api/projects/<id>/papers/import` (BibTeX/RIS import)
+- `GET /api/projects/<id>/papers/export.bib` / `.ris` (export)
 - `POST /api/projects/<id>/papers/search-add`
 - `POST /api/projects/<id>/papers/<paper_id>/pdf-upload`
 - `POST /api/projects/<id>/papers/<paper_id>/ingest`
@@ -155,11 +184,13 @@ Project endpoints:
 - `GET /api/projects/<id>/chat/<session_id>/stream`
 - `GET|POST /api/projects/<id>/reports`
 - `GET /api/projects/<id>/citation-graph`
+- `GET /api/projects/<id>/papers/<paper_a>/path/<paper_b>` (connection path)
+- `GET|POST /api/projects/<id>/paper-relations` (citation context labels)
 - `POST /api/projects/<id>/workflows/research-expand`
 
 ## Quality Checks
 
-Backend:
+Backend deterministic checks (fast, mocked):
 
 ```powershell
 cd backend
@@ -171,11 +202,32 @@ python manage.py evaluate_rag_quality --write-report
 python manage.py evaluate_pdf_rag --write-report
 ```
 
+Real-model upgrade quality checks (BGE-M3 + DeepSeek, minutes):
+
+```powershell
+python manage.py evaluate_upgrade_quality --write-report
+```
+
+Interactive end-to-end evaluation (requires running backend + DeepSeek key):
+
+```powershell
+python manage.py evaluate_interactive --write-report
+```
+
 Frontend:
 
 ```powershell
 cd frontend
+npm run test
 npm run build
+```
+
+One-command quick gate (writes a run-record evidence bundle with per-step
+output, a manifest, and a summary):
+
+```powershell
+cd backend
+python manage.py run_quality_gate --frontend
 ```
 
 Recent local results:
@@ -183,31 +235,24 @@ Recent local results:
 | Check | Result |
 |---|---:|
 | Django system check | passed |
-| Backend test suite | 169 tests passed |
-| Intent evaluation | 33/33 passed |
-| Agent quality evaluation | score 1.0 |
-| RAG quality evaluation | 32/32 passed |
-| PDF ingestion/RAG evaluation | 3/3 passed |
+| Docker PostgreSQL backend suite | 224 tests passed |
+| Stage B scope/evidence security gate | 169/169 cases passed |
+| Frontend Vitest suite | 54 tests passed |
 | Frontend production build | passed |
-| Docker backend check | passed |
+| OpenSpec strict validation | 14/14 current specs passed |
 
-Latest deterministic RAG metrics:
-
-| Metric | Value |
-|---|---:|
-| Recall@5 | 1.0 |
-| MRR | 0.977 |
-| Context Precision | 0.6207 |
-| Citation Coverage | 1.0 |
-| Faithfulness | 1.0 |
-| Unsupported Claim Rate | 0.0 |
+These numbers are the reproducible Stage B baseline. They validate project
+scope, evidence identity, citation resolution, capability policy, event
+redaction, and interface compatibility. They do not claim current live-model
+answer quality. Real BGE-M3 retrieval and DeepSeek Agent quality are evaluated
+separately before a release metric is published.
 
 ## Notes
 
 - SQLite remains available as a local fallback for tests and small development
   runs. The Docker stack uses PostgreSQL with pgvector.
-- The default embedding model is Qwen3-Embedding-0.6B. CPU inference works, but
-  cold start can be slow; keep the model cache warm for demos.
+- The default embedding model is BAAI/bge-m3. CPU inference works, but cold
+  start can be slow; keep the model cache warm for demos.
 - If Docker Hub image pulls fail on a local network, pull the equivalent Python
   and Node base images from another trusted registry and tag them locally before
   rebuilding.

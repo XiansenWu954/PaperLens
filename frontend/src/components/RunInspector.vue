@@ -49,6 +49,9 @@ function formatDate(value: string) {
           <strong>#{{ run.id }} · {{ run.kind }}</strong>
           <p>{{ run.question || 'No question' }}</p>
           <small>{{ formatDate(run.created_at) }} · {{ run.events.length }} events</small>
+          <p v-if="run.status === 'error' && run.error_message" class="run-error">
+            失败原因：{{ run.error_message }}
+          </p>
         </div>
         <span :class="['status', run.status]">{{ statusLabels[run.status] || run.status }}</span>
       </header>
@@ -141,6 +144,17 @@ li small,
 
 .status.error {
   color: var(--err);
+}
+
+.run-error {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid #e7bab3;
+  border-radius: var(--radius-sm);
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 ol {

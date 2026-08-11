@@ -1,9 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { PaperIngestionJob, ProjectPaper, ProjectRun, ReportVersion, ResearchProject } from '../types'
+import type { ImportResult } from '../types'
 import {
   createProject,
+  describeError,
   getProject,
+  importProjectPapers,
   ingestProjectPaperPdf,
   listProjectIngestionJobs,
   listProjectPapers,
@@ -35,7 +38,7 @@ export const useProjectsStore = defineStore('projects', () => {
     try {
       projects.value = await listProjects()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载项目失败'
+      error.value = describeError(e, '加载项目失败')
     } finally {
       loading.value = false
     }
@@ -69,7 +72,7 @@ export const useProjectsStore = defineStore('projects', () => {
       ingestionJobs.value = jobs
       runs.value = await listProjectRuns(projectId)
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载项目失败'
+      error.value = describeError(e, '加载项目失败')
       throw e
     } finally {
       loading.value = false
@@ -81,6 +84,13 @@ export const useProjectsStore = defineStore('projects', () => {
     papers.value = await listProjectPapers(projectId)
     currentProject.value = await getProject(projectId)
     runs.value = await listProjectRuns(projectId)
+    return result
+  }
+
+  async function importPapers(projectId: number, text: string, format: 'bibtex' | 'ris'): Promise<ImportResult> {
+    const result = await importProjectPapers(projectId, text, format)
+    papers.value = await listProjectPapers(projectId)
+    currentProject.value = await getProject(projectId)
     return result
   }
 
@@ -159,6 +169,7 @@ export const useProjectsStore = defineStore('projects', () => {
     seedDemo,
     loadProject,
     searchAdd,
+    importPapers,
     setPaperStatus,
     removePaper,
     loadRuns,

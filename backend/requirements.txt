@@ -19,6 +19,10 @@ langgraph
 langchain-core
 aiohttp
 pypdf
+docling
+bibtexparser>=1.4,<2.0
 sentence-transformers
+FlagEmbedding
 numpy
+jsonschema
 mcp

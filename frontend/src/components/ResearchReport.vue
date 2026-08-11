@@ -32,6 +32,7 @@ const html = computed(() => {
   return output
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/(pqac-[a-zA-Z0-9]{8})/g, '<span class="cite">$1</span>')
+    .replace(/\[cite:([^\]]+)\]/gi, '<span class="cite verified" title="来自项目证据">$1</span>')
 })
 </script>
 

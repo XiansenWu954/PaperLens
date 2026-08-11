@@ -6,7 +6,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
 from api.models import ResearchTask
-from api.models import ChatMessage, PaperIngestionJob, ProjectPaper, ProjectRun, ProjectRunEvent, ReportVersion, ResearchProject
+from api.models import ChatMessage, PaperIngestionJob, PaperRelation, ProjectPaper, ProjectRun, ProjectRunEvent, ReportVersion, ResearchProject
 from papers.models import Paper
 
 
@@ -139,6 +139,43 @@ class ProjectPaperEndpointTest(TestCase):
         self.assertEqual(d.status_code, 204)
         self.assertEqual(ProjectPaper.objects.count(), 0)
         self.assertTrue(Paper.objects.filter(id=self.paper.id).exists())
+
+    def test_import_bibtex_creates_project_papers(self):
+        bib = (
+            "@article{k1,\n title={Paper One}, author={Doe, John}, year={2024}, doi={10.1/p1}\n}\n"
+            "@article{k2,\n title={Paper Two}, author={Roe, Jane}, year={2023}\n}\n"
+        )
+        r = self.client.post(
+            f"/api/projects/{self.project.id}/papers/import",
+            {"format": "bibtex", "text": bib},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["count"], 2)
+        self.assertEqual(ProjectPaper.objects.filter(project=self.project).count(), 2)
+        titles = {pp.paper.title for pp in ProjectPaper.objects.filter(project=self.project)}
+        self.assertEqual(titles, {"Paper One", "Paper Two"})
+
+    def test_import_bibtex_idempotent(self):
+        bib = "@article{k1,\n title={Dup}, year={2024}, doi={10.1/dup}\n}\n"
+        self.client.post(f"/api/projects/{self.project.id}/papers/import", {"format": "bibtex", "text": bib}, format="json")
+        r2 = self.client.post(f"/api/projects/{self.project.id}/papers/import", {"format": "bibtex", "text": bib}, format="json")
+        self.assertEqual(r2.status_code, 201)
+        self.assertEqual(ProjectPaper.objects.filter(project=self.project).count(), 1)
+
+    def test_export_bibtex_and_ris(self):
+        self.client.post(
+            f"/api/projects/{self.project.id}/papers",
+            {"paper_id": self.paper.id, "status": "included"},
+            format="json",
+        )
+        rb = self.client.get(f"/api/projects/{self.project.id}/papers/export.bib")
+        self.assertEqual(rb.status_code, 200)
+        self.assertIn("Attention Is All You Need", rb.content.decode())
+        self.assertIn("@", rb.content.decode())
+        rr = self.client.get(f"/api/projects/{self.project.id}/papers/export.ris")
+        self.assertEqual(rr.status_code, 200)
+        self.assertIn("TY  - JOUR", rr.content.decode())
 
     def test_demo_seed(self):
         r = self.client.post("/api/projects/demo-seed", {}, format="json")
@@ -317,3 +354,92 @@ class ProjectChatEndpointTest(TestCase):
         event_types = [event["event_type"] for event in r.data[0]["events"]]
         self.assertIn("intent_detected", event_types)
         self.assertIn("tool_call", event_types)
+
+
+class PaperRelationEndpointTest(TestCase):
+    """引用语境标注（支持/反对/提及）。"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.project = ResearchProject.objects.create(title="Relations")
+        # A 引用 B（openalex id 匹配）
+        self.paper_a = Paper.objects.create(
+            title="Paper A builds on B", year=2024, openalex_id="W111",
+            abstract="We extend the method of Paper B.", referenced_works=["W222"],
+        )
+        self.paper_b = Paper.objects.create(
+            title="Paper B base method", year=2020, openalex_id="W222",
+            abstract="A foundational method for sequence modeling.",
+        )
+        ProjectPaper.objects.create(project=self.project, paper=self.paper_a, status="included")
+        ProjectPaper.objects.create(project=self.project, paper=self.paper_b, status="included")
+
+    def test_post_analyzes_relations_with_mocked_llm(self):
+        fake = mock.MagicMock()
+        fake.complete.return_value = {
+            "content": '{"label": "supporting", "reason": "A extends B method"}',
+        }
+        with mock.patch("llm.deepseek.DeepSeekClient", return_value=fake):
+            r = self.client.post(f"/api/projects/{self.project.id}/paper-relations", {}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["analyzed"], 1)
+        rel = PaperRelation.objects.get(project=self.project)
+        self.assertEqual(rel.label, "supporting")
+        self.assertIn("extends", rel.context)
+
+    def test_get_returns_analyzed_relations(self):
+        PaperRelation.objects.create(
+            project=self.project, citing_paper=self.paper_a, cited_paper=self.paper_b,
+            label="mentioning", context="brief mention", confidence=0.5,
+        )
+        r = self.client.get(f"/api/projects/{self.project.id}/paper-relations")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data), 1)
+        self.assertEqual(r.data[0]["label"], "mentioning")
+        self.assertEqual(r.data[0]["citing_title"], "Paper A builds on B")
+
+
+class FixtureResetTest(TestCase):
+    """Snapshot fixtures: reset_project_state + make_fixture_project (§3.2)."""
+
+    def test_reset_project_state_clears_runs_sessions_reports_links(self):
+        from api.fixtures import reset_project_state
+        from api.models import ChatSession
+
+        project = ResearchProject.objects.create(title="Reset target", status="active")
+        # Pollute it with the child rows a harness run would create.
+        run = ProjectRun.objects.create(project=project, kind="chat", status="done", question="q")
+        ProjectRunEvent.objects.create(run=run, event_type="tool_call", payload={"name": "rag"})
+        session = ChatSession.objects.create(project=project)
+        ChatMessage.objects.create(session=session, role="user", content="hi")
+        ReportVersion.objects.create(project=project, title="r", content="c", source="agent")
+        PaperRelation.objects.create(
+            project=project, citing_paper=self.paper_a if hasattr(self, "paper_a") else None,
+            cited_paper=None, label="mentioning", context="x", confidence=0.1,
+        ) if hasattr(self, "paper_a") else None
+
+        cleared = reset_project_state(project.id)
+        # All child rows gone; project itself survives.
+        self.assertEqual(ProjectRun.objects.filter(project_id=project.id).count(), 0)
+        self.assertEqual(ProjectRunEvent.objects.filter(run__project_id=project.id).count(), 0)
+        self.assertEqual(ChatSession.objects.filter(project_id=project.id).count(), 0)
+        self.assertEqual(ChatMessage.objects.filter(session__project_id=project.id).count(), 0)
+        self.assertEqual(ReportVersion.objects.filter(project_id=project.id).count(), 0)
+        self.assertTrue(ResearchProject.objects.filter(id=project.id).exists())
+
+    def test_make_fixture_project_creates_each_kind_and_is_idempotent(self):
+        from api.fixtures import make_fixture_project
+
+        evidence = make_fixture_project("evidence")
+        empty = make_fixture_project("empty")
+        isolation = make_fixture_project("isolation")
+
+        # evidence has demo papers; empty has none; isolation has the GNN papers.
+        self.assertGreaterEqual(ProjectPaper.objects.filter(project=evidence).count(), 2)
+        self.assertEqual(ProjectPaper.objects.filter(project=empty).count(), 0)
+        self.assertGreaterEqual(ProjectPaper.objects.filter(project=isolation).count(), 2)
+
+        # Calling again reuses the same project row and resets (snapshot).
+        evidence_again = make_fixture_project("evidence")
+        self.assertEqual(evidence_again.id, evidence.id)
+        self.assertGreaterEqual(ProjectPaper.objects.filter(project=evidence).count(), 2)

@@ -14,7 +14,6 @@ import os
 import sys
 from pathlib import Path
 
-import dj_database_url
 from dotenv import load_dotenv
 
 # 加载 .env（DEEPSEEK_API_KEY 等本地配置；不提交到 git）
@@ -30,7 +29,9 @@ LOG_DIR.mkdir(exist_ok=True)
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-tv%4hcyp(7*=vmxe!1&2(!hio-g^2d9bzad=p$zrvktht2r!_6'
+# Local dev falls back to a fixed insecure key; production MUST set
+# DJANGO_SECRET_KEY (see .env.example).
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or "django-insecure-tv%4hcyp(7*=vmxe!1&2(!hio-g^2d9bzad=p$zrvktht2r!_6"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
@@ -42,10 +43,18 @@ ALLOWED_HOSTS = [
 ]
 
 IS_TESTING = "test" in sys.argv
-PROJECT_CHAT_LIVE_LLM = os.environ.get(
-    "PAPERLENS_PROJECT_CHAT_LIVE_LLM",
-    "0" if IS_TESTING else "1",
-) == "1"
+# GPT v5: force HF/transformers offline in test mode as a second layer of network
+# protection (first layer is fake provider + mocked datasources/Docling).
+if IS_TESTING:
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+# In test mode, default the live LLM OFF so deterministic eval tests never
+# burn real DeepSeek quota. An explicit PAPERLENS_TEST_LIVE_LLM=1 can opt back in.
+PROJECT_CHAT_LIVE_LLM = (
+    (os.environ.get("PAPERLENS_TEST_LIVE_LLM") == "1")
+    if IS_TESTING
+    else (os.environ.get("PAPERLENS_PROJECT_CHAT_LIVE_LLM", "1") == "1")
+)
 
 
 # Application definition
@@ -130,6 +139,8 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # fallback is kept for fast local tests when Docker is not available.
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
+    import dj_database_url
+
     DATABASES = {
         "default": dj_database_url.parse(
             DATABASE_URL,
@@ -184,14 +195,21 @@ STATIC_URL = 'static/'
 MEDIA_ROOT = Path(os.environ.get("DJANGO_MEDIA_ROOT", BASE_DIR / "media"))
 MEDIA_URL = os.environ.get("DJANGO_MEDIA_URL", "/media/")
 
+# GPT v5: custom test runner with socket-level network guard for offline suite.
+TEST_RUNNER = "config.test_runner.GuardedTestRunner"
+
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0") == "1" or IS_TESTING
 CELERY_TASK_EAGER_PROPAGATES = True
 
-PAPERLENS_EMBEDDING_PROVIDER = os.environ.get("PAPERLENS_EMBEDDING_PROVIDER", "qwen3-local")
-PAPERLENS_EMBEDDING_MODEL = os.environ.get("PAPERLENS_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+PAPERLENS_EMBEDDING_PROVIDER = os.environ.get("PAPERLENS_EMBEDDING_PROVIDER", "bge-m3")
+PAPERLENS_EMBEDDING_MODEL = os.environ.get("PAPERLENS_EMBEDDING_MODEL", "BAAI/bge-m3")
 PAPERLENS_EMBEDDING_DIM = int(os.environ.get("PAPERLENS_EMBEDDING_DIM", "1024"))
+# 测试环境强制 fake provider，避免下载真实 BGE-M3/Qwen3 模型和访问 HuggingFace。
+# 即使 .env 设了 bge-m3，测试也用 fake（除非显式 PAPERLENS_TEST_REAL_EMBEDDING=1）。
+if IS_TESTING and os.environ.get("PAPERLENS_TEST_REAL_EMBEDDING") != "1":
+    PAPERLENS_EMBEDDING_PROVIDER = "fake"
 PAPERLENS_EMBEDDING_VERSION = os.environ.get(
     "PAPERLENS_EMBEDDING_VERSION",
     f"{PAPERLENS_EMBEDDING_MODEL}:dim{PAPERLENS_EMBEDDING_DIM}:norm",
@@ -269,3 +287,16 @@ LOGGING = {
         },
     },
 }
+
+
+# 启动期配置就绪提示（仅一次，便于公开仓库用户快速定位问题）
+import logging as _logging
+
+_startup_logger = _logging.getLogger("paperlens.startup")
+if not IS_TESTING:
+    if not os.environ.get("DEEPSEEK_API_KEY", ""):
+        _startup_logger.warning(
+            "DEEPSEEK_API_KEY 未配置：服务可正常启动，但 Agent Chat / 报告生成 / "
+            "RAG 重排等 LLM 功能将返回明确提示。请在 backend/.env 填入你的 "
+            "DeepSeek API Key 后重启（参考 README 的 Configuration 章节）。"
+        )

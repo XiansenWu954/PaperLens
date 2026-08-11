@@ -238,7 +238,7 @@ function uploadPdf(paperId: number, event: Event) {
           从链接入库
         </button>
         <p v-if="paper.ingestion_status === 'failed'" class="ingest-error">
-          最近一次入库失败，可重新上传或从链接重试。
+          入库失败{{ paper.latest_ingestion_error ? `：${paper.latest_ingestion_error}` : '' }}，可重新上传或从链接重试。
         </p>
         <template v-if="pendingRemoveId === paper.paper_id">
           <button type="button" class="secondary-button" @click="cancelRemove">取消</button>

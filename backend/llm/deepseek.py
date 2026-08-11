@@ -43,11 +43,24 @@ class DeepSeekClient:
     ) -> None:
         self.model = model
         self.max_retries = max_retries
+        # 缺 key 时不立即报错：允许服务启动、health 检查与纯检索功能正常。
+        # 真正需要调用 LLM 时由 _require_key() 抛出带配置指引的中文错误。
+        self._api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self._client = OpenAI(
-            api_key=api_key or os.environ["DEEPSEEK_API_KEY"],
+            api_key=self._api_key or "missing",
             base_url=base_url or DEFAULT_BASE_URL,
             timeout=timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
         )
+
+    @staticmethod
+    def _require_key() -> None:
+        """调用 LLM 前校验 key，缺失时给出清晰配置指引而非裸 KeyError。"""
+        if not os.environ.get("DEEPSEEK_API_KEY", ""):
+            raise RuntimeError(
+                "未配置 DEEPSEEK_API_KEY。请在 backend/.env 填入你的 DeepSeek "
+                "API Key 后重启服务（参考 README 的 Configuration 章节）。"
+            )
+
 
     def complete(
         self,
@@ -65,6 +78,7 @@ class DeepSeekClient:
         thinking=True 保留 reasoning（Agent 决策用）。
         返回 {content, usage, raw}。
         """
+        self._require_key()
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -102,6 +116,7 @@ class DeepSeekClient:
         thinking=False 时也可关闭降本（但 Function Calling 建议保留）。
         返回 {content, tool_calls, usage}。
         """
+        self._require_key()
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -126,6 +141,11 @@ class DeepSeekClient:
         return {
             "content": msg.content or "",
             "tool_calls": tool_calls,
+            # DeepSeek thinking-mode protocol: when an assistant message carries
+            # tool_calls, the FOLLOW-UP request must include the prior
+            # reasoning_content or the API can return 400. Surface it so the
+            # ReAct loop can re-append it (deepseek-live-evaluation-plan §3.3).
+            "reasoning_content": getattr(msg, "reasoning_content", None),
             "usage": _usage_dict(data),
             "raw": data.model_dump(),
         }

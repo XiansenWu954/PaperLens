@@ -23,11 +23,27 @@ const stats = computed(() => ({
   frontiers: props.data.nodes.filter((node) => node.is_frontier).length,
 }))
 
+// 推荐先读：按 pagerank（seminal）降序，seminal 相同时按引用数
 const visibleNodes = computed(() =>
   [...props.data.nodes]
-    .sort((a, b) => Number(b.is_root) - Number(a.is_root) || Number(b.is_frontier) - Number(a.is_frontier) || (b.citation_count || 0) - (a.citation_count || 0))
+    .sort((a, b) => (b.seminal || 0) - (a.seminal || 0) || (b.citation_count || 0) - (a.citation_count || 0))
     .slice(0, 8),
 )
+
+// 主题分组：按 cluster 聚合，显示主题标签 + 成员数 + 代表论文
+const topicGroups = computed(() => {
+  const groups = new Map<number, { label: string; nodes: GraphNode[] }>()
+  for (const node of props.data.nodes) {
+    const cid = node.cluster || 0
+    if (!groups.has(cid)) {
+      groups.set(cid, { label: node.cluster_label || `主题 ${cid}`, nodes: [] })
+    }
+    groups.get(cid)!.nodes.push(node)
+  }
+  return [...groups.values()]
+    .map((g) => ({ ...g, count: g.nodes.length, top: g.nodes.sort((a, b) => (b.seminal || 0) - (a.seminal || 0))[0] }))
+    .sort((a, b) => b.count - a.count)
+})
 
 function colorFor(cluster: number) {
   return clusterPalette[Math.abs(cluster || 0) % clusterPalette.length]
@@ -35,7 +51,9 @@ function colorFor(cluster: number) {
 
 function radius(node: GraphNode) {
   const citations = node.citation_count || 0
-  return Math.max(5, Math.min(17, 5 + Math.log10(citations + 1) * 4))
+  const seminal = node.seminal || 0
+  // 引用数 + pagerank 双因子叠加：高中心性论文更显眼
+  return Math.max(5, Math.min(17, 5 + Math.log10(citations + 1) * 3 + Math.sqrt(seminal) * 6))
 }
 
 function resizeCanvas() {
@@ -181,7 +199,8 @@ onUnmounted(() => {
       <span>{{ stats.frontiers }} 前沿</span>
     </div>
 
-    <div v-if="visibleNodes.length" class="node-list" aria-label="图谱论文列表">
+    <div v-if="visibleNodes.length" class="node-list" aria-label="推荐先读">
+      <p class="list-title">推荐先读（按影响力排序）</p>
       <button
         v-for="node in visibleNodes"
         :key="node.id"
@@ -195,6 +214,21 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <div v-if="topicGroups.length > 1" class="topic-groups" aria-label="主题分组">
+      <p class="list-title">主题分组</p>
+      <button
+        v-for="(group, index) in topicGroups.slice(0, 6)"
+        :key="index"
+        type="button"
+        class="topic-row"
+        @click="selectNode(group.top)"
+      >
+        <i :style="{ background: colorFor(group.top.cluster) }"></i>
+        <span>{{ group.label }}</span>
+        <small>{{ group.count }} 篇</small>
+      </button>
+    </div>
+
     <aside v-if="selected" class="paper-detail">
       <button type="button" class="ghost-button close" @click="closeDetail" aria-label="关闭论文详情">×</button>
       <p class="detail-kicker">Selected paper</p>
@@ -202,7 +236,8 @@ onUnmounted(() => {
       <dl>
         <div><dt>Year</dt><dd>{{ selected.year || 'Unknown' }}</dd></div>
         <div><dt>Citations</dt><dd>{{ selected.citation_count }}</dd></div>
-        <div><dt>Cluster</dt><dd>{{ selected.cluster }}</dd></div>
+        <div><dt>Influence</dt><dd>{{ (selected.seminal || 0).toFixed(3) }}</dd></div>
+        <div><dt>Topic</dt><dd>{{ selected.cluster_label || `主题 ${selected.cluster}` }}</dd></div>
       </dl>
       <div class="tags">
         <span v-if="selected.is_root">奠基性</span>
@@ -309,10 +344,60 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.list-title {
+  margin: 10px 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.topic-groups {
+  display: grid;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.topic-row {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+
+.topic-row:hover {
+  border-color: var(--accent);
+}
+
+.topic-row i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: block;
+}
+
+.topic-row span {
+  font-size: 12px;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topic-row small {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .node-list {
   display: grid;
   gap: 6px;
-  margin-top: 10px;
+  margin-top: 4px;
 }
 
 .node-list button {

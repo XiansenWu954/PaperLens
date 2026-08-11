@@ -15,11 +15,10 @@
 **铁律**：没有 spec 不编码；没有批准不 apply；不在 spec 外擅自加功能。
 
 ## 2. 项目硬约束（来自用户，不可违背）
-- **LLM**：只用 DeepSeek，唯一密钥从 `backend/.env` 的 `DEEPSEEK_API_KEY` 读，**绝不硬编码进源码，绝不打印**。
+- **LLM**：只用 DeepSeek 作为 LLM provider。密钥从环境注入（根 `.env` 是 Docker Compose 输入，`backend/.env` 是独立 Django 输入），**绝不硬编码进源码，绝不打印**。具体模型名从配置读取（当前 `deepseek-v4-flash` / `deepseek-v4-pro`），短期可用型号不作为永久架构硬约束。
 - **零额外成本**：数据源只用免费的（OpenAlex/ArXiv/DBLP），**不注册任何付费/需 key 的服务**。Semantic Scholar 仅匿名层低频使用。
-- **本地库**：所有抓取的论文/元数据/图谱节点持久化到本地 SQLite，**同份数据绝不重复请求**（既是防限流，也是"本地库存"要求）。
+- **本地库**：所有抓取的论文/元数据/图谱节点持久化到本地数据库（PostgreSQL 主路径），**同份数据绝不重复请求**（既是防限流，也是"本地库存"要求）。
 - **自建 Agent**：多智能体用 LangGraph 从零自建，DeepSeek 是唯一 LLM。
-- **模型名**：当前可用模型为 `deepseek-v4-flash` / `deepseek-v4-pro`，**旧名 `deepseek-chat`/`deepseek-reasoner` 已停用，禁用**。
 - **Reasoning 控制**：V4-Flash 默认带思维链（耗 token）。预算敏感节点（简单工具调用/纯生成）用 `thinking={"type":"disabled"}` 关闭降本。
 
 ## 3. 已验证的地基事实（spec 的前提，不得臆造）
@@ -32,7 +31,7 @@
 | OpenAlex 摘要 | 部分论文 `abstract_inverted_index` 为空，需 ArXiv/字段补全 | 检查2 |
 | ArXiv | ✅ 元数据可用，PDF 链接需修正则 | 检查3 |
 | DBLP | ✅ 可用，需加 `User-Agent` 头修 SSL EOF | 检查4 |
-| 环境 | WSL2 / Python 3.12.3 / Node v22.22.0 / 代理 7897 | 环境验证 |
+| 环境 | Windows / Python 3.11+ / Node 22+ / Docker Desktop | 环境验证 |
 
 ## 4. 架构缝合依据（每个模块锚定一个 SOTA，不得凭空设计）
 | 模块 | SOTA 参考 | 复刻什么 |
@@ -46,17 +45,22 @@
 
 **原则**：写每个模块前，先在 design.md 里标明"这个模式来自哪个 SOTA 的哪个文件/类"，再落地。不抄则必须有明确理由。
 
-## 5. 技术栈（已定）
-- 后端：Django 4.2+ + DRF + Daphne(ASGI) + LangGraph + SQLite
-- LLM：DeepSeek-V4-Flash（OpenAI 兼容端点，litellm 或 openai sdk）
-- 向量：起步 NumpyVectorStore（PaperQA2 方案）/ 量大升 Chroma
-- 图谱：networkx（bibliographic_coupling/cocitation/louvain 自带）+ cdlib Leiden
-- 前端：Vue 3 + Vite + TS + Pinia + VueUse + d3-force/force-graph
+## 5. 技术栈（V3 已定）
+- 后端：Django 4.2+ + DRF + Daphne(ASGI)
+- 主数据库/向量：PostgreSQL + pgvector（集成/演示主路径）；SQLite 仅限本地 fallback 或隔离单元测试
+- 队列：Redis + Celery（PDF 解析、embedding、外部检索和长任务工作单元）
+- LLM：DeepSeek（模型名从环境配置读取，当前 `deepseek-v4-flash`/`deepseek-v4-pro`）
+- Embedding：BGE-M3（dense + sparse），维度 1024，version 随索引记录；测试默认 fake provider
+- Agent：deterministic router（稳定基线）+ bounded ReAct Harness（开放式工具调用）
+- 长流程：LangGraph（仅用于可恢复长任务：checkpoint/waiting/resume），普通 Chat 不图化
+- 图谱：networkx（bibliographic_coupling/cocitation/louvain 自带）
+- 前端：Vue 3 + Vite + TS + Pinia + VueUse + d3-force
+- MCP：导出稳定项目读能力，复用内部工具契约和授权边界
 
 ## 6. 编码规范
 - Python：类型注解必填，pydantic 做配置/结构化输出，异步优先（agent 全 async）。
 - 密钥/配置：只从环境变量/`.env` 读；`.env` 在 `.gitignore`，绝不提交。
-- 缓存：所有外部 API 调用必经缓存层（SQLite），带 429 指数退避 + Retry-After。
+- 缓存：所有外部 API 调用必经缓存层（PostgreSQL/SQLite），带 429 指数退避 + Retry-After。
 - 引用忠实：综述里每条声明必须有 pqac 引用 key，LLM 只能引用注入的 Valid Keys。
 - 诚实量化：任何"提升"声称必须有同评测集的严格对比支撑（吸取 AppPilot 教训）。
 - 注释密度：跟随周围代码风格；中文注释 OK，但标识符用英文。

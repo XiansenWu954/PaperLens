@@ -28,9 +28,17 @@ htmlcov/
 /backend/staticfiles/
 
 # Evaluation/runtime artifacts
-/backend/eval/reports/*.json
-/backend/eval/reports/*.pdf
-/backend/eval/reports/*.png
+/backend/eval/reports/
+/docs/internal/
+/docs/handoff-*.md
+/docs/engineering-log.md
+/docs/agent-rebuild-research.md
+/docs/agent-quality-metrics.md
+/docs/quality-assessment-log.md
+/frontend/e2e-report/
+/frontend/test-results/
+/.zcode/
+/backend/C/
 
 # Frontend
 /frontend/node_modules/

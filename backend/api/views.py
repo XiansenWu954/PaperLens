@@ -13,7 +13,7 @@ from pathlib import Path
 from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.db.models import Count, OuterRef, Subquery
-from django.http import StreamingHttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -24,7 +24,7 @@ from papers.models import Paper, upsert_paper
 from realtime.sse import _sse
 
 from .demo import seed_demo_project
-from .models import ChatSession, PaperIngestionJob, ProjectPaper, ProjectRun, ProjectRunEvent, ReportVersion, ResearchProject, ResearchTask
+from .models import ChatSession, PaperIngestionJob, PaperRelation, ProjectPaper, ProjectRun, ProjectRunEvent, ReportVersion, ResearchProject, ResearchTask
 from .serializers import (
     ChatSessionSerializer,
     CreateResearchTaskSerializer,
@@ -206,6 +206,88 @@ def project_papers(request, project_id: int):
     return Response(ProjectPaperSerializer(link).data, status=status.HTTP_201_CREATED)
 
 
+@api_view(["POST"])
+def project_papers_import(request, project_id: int):
+    """从 BibTeX / RIS 文本或上传文件批量导入论文到项目库。
+
+    接受：
+    - multipart 上传 .bib/.ris 文件（字段 file）
+    - JSON body {format: "bibtex"|"ris", text: "..."}
+    """
+    from papers.bibtex import parse_bibtex, parse_ris
+    from papers.models import upsert_paper
+
+    project = ResearchProject.objects.filter(id=project_id).first()
+    if not project:
+        return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+
+    fmt = (request.data.get("format") or "").strip().lower()
+    text = request.data.get("text") or ""
+    upload = request.FILES.get("file")
+    if upload:
+        text = upload.read().decode("utf-8", errors="replace")
+        if not fmt:
+            fmt = "bibtex" if upload.name.lower().endswith(".bib") else "ris"
+    if not text.strip():
+        return Response({"error": "text 或 file 必填"}, status=status.HTTP_400_BAD_REQUEST)
+    if not fmt:
+        fmt = "bibtex" if " @" in text or "@article" in text.lower() or "@inproceedings" in text.lower() else "ris"
+
+    payloads = parse_bibtex(text) if fmt == "bibtex" else parse_ris(text)
+    if not payloads:
+        return Response({"error": f"未解析出任何条目（{fmt}）"}, status=status.HTTP_400_BAD_REQUEST)
+
+    added: list[dict] = []
+    for payload in payloads:
+        paper = upsert_paper(payload)
+        link, created = ProjectPaper.objects.get_or_create(
+            project=project,
+            paper=paper,
+            defaults={
+                "status": "candidate",
+                "source_reason": f"Imported from {fmt}",
+                "added_by": "user",
+            },
+        )
+        added.append({"paper_id": paper.id, "title": paper.title, "created": created})
+    logger.info(
+        "project papers imported",
+        extra={"event": "project_papers_imported", "project_id": project_id, "count": len(added), "format": fmt},
+    )
+    return Response({"format": fmt, "count": len(added), "added": added}, status=status.HTTP_201_CREATED)
+
+
+def _project_papers_for_export(project_id: int) -> list:
+    return [row.paper for row in ProjectPaper.objects.select_related("paper", "paper__venue")
+            .filter(project_id=project_id).exclude(status="excluded")]
+
+
+@api_view(["GET"])
+def project_papers_export_bib(request, project_id: int):
+    """导出项目论文库为 BibTeX。"""
+    from papers.bibtex import papers_to_bibtex
+
+    if not ResearchProject.objects.filter(id=project_id).exists():
+        return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+    content = papers_to_bibtex(_project_papers_for_export(project_id))
+    resp = HttpResponse(content, content_type="application/x-bibtex")
+    resp["Content-Disposition"] = f'attachment; filename="project-{project_id}.bib"'
+    return resp
+
+
+@api_view(["GET"])
+def project_papers_export_ris(request, project_id: int):
+    """导出项目论文库为 RIS。"""
+    from papers.bibtex import papers_to_ris
+
+    if not ResearchProject.objects.filter(id=project_id).exists():
+        return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+    content = papers_to_ris(_project_papers_for_export(project_id))
+    resp = HttpResponse(content, content_type="application/x-research-info-systems")
+    resp["Content-Disposition"] = f'attachment; filename="project-{project_id}.ris"'
+    return resp
+
+
 @api_view(["PATCH", "DELETE"])
 def project_paper_detail(request, project_id: int, paper_id: int):
     link = ProjectPaper.objects.filter(project_id=project_id, paper_id=paper_id).first()
@@ -368,10 +450,141 @@ def project_reports(request, project_id: int):
 def project_citation_graph(request, project_id: int):
     if not ResearchProject.objects.filter(id=project_id).exists():
         return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+    from agent.context import create_context
+    from agent.project_tools import execute_project_tool
+
     result = async_to_sync(execute_project_tool)(
-        "get_project_citation_graph", {"project_id": project_id}
+        create_context(project_id), "get_project_citation_graph", {}
     )
     return Response(result.get("graph", {"nodes": [], "edges": []}))
+
+
+@api_view(["GET"])
+def project_paper_connection_path(request, project_id: int, paper_a_id: int, paper_b_id: int):
+    """两篇论文之间的引用连接路径（缝合 Inciteful Literature Connector）。"""
+    if not ResearchProject.objects.filter(id=project_id).exists():
+        return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+    from citation.graph_build import build_similarity_graph
+    from citation.paths import find_connection_path
+    from api.models import ProjectPaper
+
+    papers = [
+        row.paper
+        for row in ProjectPaper.objects.select_related("paper")
+        .filter(project_id=project_id).exclude(status="excluded")
+    ]
+    if paper_a_id not in {p.id for p in papers} or paper_b_id not in {p.id for p in papers}:
+        return Response({"error": "论文不在项目范围内"}, status=status.HTTP_404_NOT_FOUND)
+    G = build_similarity_graph(papers)
+    result = find_connection_path(G, paper_a_id, paper_b_id)
+    return Response(result)
+
+
+@api_view(["GET", "POST"])
+def project_paper_relations(request, project_id: int):
+    """论文间引用语境标注（支持/反对/提及，对齐 Scite smart citations）。
+
+    GET：返回项目内已分析的引用关系。
+    POST：扫描项目论文的 referenced_works，对能匹配到项目库内的引用关系
+          用 DeepSeek 做轻量分类（基于双方摘要），结果缓存到 PaperRelation。
+    """
+    if not ResearchProject.objects.filter(id=project_id).exists():
+        return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+    project = ResearchProject.objects.get(id=project_id)
+
+    if request.method == "GET":
+        relations = PaperRelation.objects.filter(project=project).select_related(
+            "citing_paper", "cited_paper"
+        )
+        return Response([
+            {
+                "citing_paper_id": r.citing_paper_id,
+                "citing_title": r.citing_paper.title[:80],
+                "cited_paper_id": r.cited_paper_id,
+                "cited_title": r.cited_paper.title[:80],
+                "label": r.label,
+                "context": r.context,
+                "confidence": r.confidence,
+            }
+            for r in relations
+        ])
+
+    # POST：分析项目内的引用语境
+    from django.utils import timezone
+
+    paper_rows = list(
+        ProjectPaper.objects.select_related("paper")
+        .filter(project_id=project_id)
+        .exclude(status="excluded")
+    )
+    # 建立 openalex_id -> paper 的索引（用于匹配 referenced_works）
+    id_to_paper = {row.paper.openalex_id: row.paper for row in paper_rows if row.paper.openalex_id}
+    # 归一化 openalex id（去 URL 前缀）
+    def _norm_oid(oid):
+        return oid.rsplit("/", 1)[-1] if oid and "/" in oid else (oid or "")
+
+    id_to_paper_norm = {_norm_oid(k): v for k, v in id_to_paper.items()}
+
+    analyzed = 0
+    for row in paper_rows:
+        citing = row.paper
+        for ref_oid in (citing.referenced_works or []):
+            cited = id_to_paper_norm.get(_norm_oid(ref_oid))
+            if not cited or cited.id == citing.id:
+                continue
+            rel, _created = PaperRelation.objects.get_or_create(
+                project=project, citing_paper=citing, cited_paper=cited,
+                defaults={"label": "unanalyzed"},
+            )
+            if rel.label != "unanalyzed":
+                continue  # 已分析则跳过（缓存）
+            label, context, confidence = _classify_citation_context(citing, cited)
+            rel.label = label
+            rel.context = context
+            rel.confidence = confidence
+            rel.analyzed_at = timezone.now()
+            rel.save()
+            analyzed += 1
+    logger.info(
+        "paper relations analyzed",
+        extra={"event": "paper_relations_analyzed", "project_id": project_id, "analyzed": analyzed},
+    )
+    return Response({"analyzed": analyzed}, status=status.HTTP_200_OK)
+
+
+def _classify_citation_context(citing, cited) -> tuple[str, str, float]:
+    """用 DeepSeek 对单条引用关系做轻量分类（基于双方摘要）。
+
+    返回 (label, context, confidence)。缺 key 或 LLM 失败时返回 mentioning 兜底。
+    """
+    import json
+    from llm.deepseek import DeepSeekClient
+
+    prompt = (
+        "判断以下引用关系的语境。论文 A 在参考文献中列出了论文 B。\n"
+        f"论文 A《{citing.title}》摘要：{(citing.abstract or '无摘要')[:300]}\n"
+        f"论文 B《{cited.title}》摘要：{(cited.abstract or '无摘要')[:300]}\n\n"
+        "输出严格 JSON：{\"label\": \"supporting|contradicting|mentioning\", "
+        "\"reason\": \"一句话说明判断依据（约30字）\"}\n"
+        "- supporting：A 的方法/结论基于或支持 B\n"
+        "- contradicting：A 反驳或对比 B\n"
+        "- mentioning：仅提及，无明确支持/反对\n只输出 JSON。"
+    )
+    try:
+        client = DeepSeekClient()
+        r = client.complete(
+            [{"role": "user", "content": prompt}],
+            thinking=False,
+            max_tokens=150,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(r["content"])
+        label = data.get("label", "mentioning")
+        if label not in {"supporting", "contradicting", "mentioning"}:
+            label = "mentioning"
+        return label, str(data.get("reason", ""))[:200], 0.7
+    except Exception:
+        return "mentioning", "", 0.0
 
 
 @api_view(["GET"])
@@ -404,11 +617,14 @@ def project_research_expand_workflow(request, project_id: int):
     from .tasks import run_research_expand_workflow_task
 
     result = run_research_expand_workflow_task.delay(run.id)
-    ProjectRunEvent.objects.create(
+    # §30.1: unified EventPublisher — the question is never persisted; only
+    # the celery id and publisher-derived correlation ids are stored.
+    from agent.event_publisher import EventPublisher
+
+    EventPublisher(
         run=run,
-        event_type="workflow_queued",
-        payload={"celery_task_id": result.id or "", "question": question[:160]},
-    )
+        request_id=getattr(request, "paperlens_request_id", ""),
+    ).publish("workflow_queued", {"celery_task_id": result.id or ""})
     logger.info(
         "research expansion workflow queued",
         extra={

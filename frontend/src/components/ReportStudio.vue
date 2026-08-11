@@ -43,7 +43,7 @@ const audit = computed(() => {
     return candidates.some((candidate) => normalize(candidate).length > 8 && normalized.includes(normalize(candidate)))
   })
   const pqacCount = (content.match(/pqac-[a-zA-Z0-9]{8}/g) || []).length
-  const sourceMarkerCount = (content.match(/\[(source|citation|evidence|来源|引用)[:：][^\]]+\]/gi) || []).length
+  const sourceMarkerCount = (content.match(/\[(source|citation|evidence|cite|来源|引用)[:：][^\]]+\]/gi) || []).length
   const hasEvidenceAnchors = citedPapers.length > 0 || pqacCount > 0 || sourceMarkerCount > 0
   return {
     citedPapers,
@@ -232,11 +232,11 @@ async function copyReport() {
             <strong>{{ audit.citedPapers.length }}</strong>
             <span>pqac 标记</span>
             <strong>{{ audit.pqacCount }}</strong>
-            <span>来源标记</span>
-            <strong>{{ audit.sourceMarkerCount }}</strong>
+            <span>[cite] 来源标记</span>
+            <strong :class="{ ok: audit.sourceMarkerCount > 0 }">{{ audit.sourceMarkerCount }}</strong>
           </div>
           <p class="audit-note" :class="{ warn: !audit.hasEvidenceAnchors }">
-            {{ audit.hasEvidenceAnchors ? '报告包含可追踪证据锚点，仍建议人工核查语义是否忠实。' : '当前报告缺少明显证据锚点，提交前应补充论文标题或引用标记。' }}
+            {{ audit.hasEvidenceAnchors ? '报告包含可追踪证据锚点（[cite] 标记可回溯到项目论文），仍建议人工核查语义是否忠实。' : '当前报告缺少明显证据锚点，提交前应补充论文标题或 [cite] 引用标记。' }}
           </p>
           <div v-if="audit.missingPapers.length" class="missing-list">
             <span>未覆盖论文</span>

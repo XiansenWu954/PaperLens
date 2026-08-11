@@ -25,14 +25,14 @@ INTENT_EVAL_CASES = (
     IntentEvalCase(
         "answer_compare_en",
         "compare these papers",
-        "answer",
-        ("query_project_rag",),
+        "compare",
+        ("compare_papers",),
     ),
     IntentEvalCase(
         "answer_compare_papers_en",
         "compare Mamba and Transformer papers",
-        "answer",
-        ("query_project_rag",),
+        "compare",
+        ("compare_papers",),
     ),
     IntentEvalCase(
         "answer_what_papers_say_en",
@@ -55,8 +55,8 @@ INTENT_EVAL_CASES = (
     IntentEvalCase(
         "answer_compare_cn",
         "基于这些论文对比 Mamba 和 Transformer。",
-        "answer",
-        ("query_project_rag",),
+        "compare",
+        ("compare_papers",),
     ),
     IntentEvalCase(
         "answer_citation_request_not_graph",
@@ -115,7 +115,7 @@ INTENT_EVAL_CASES = (
     IntentEvalCase(
         "library_core_recommendation_cn",
         "列出当前项目论文，并说明哪些更适合作为核心论文。",
-        "library",
+        "library_reasoning",
         ("list_project_papers", "query_project_rag"),
     ),
     IntentEvalCase(
@@ -215,7 +215,7 @@ INTENT_EVAL_CASES = (
         "",
         "empty",
         tuple(),
-        True,
+        False,  # §25.2: an empty message is a CLARIFY request, not blocked
     ),
 )
 

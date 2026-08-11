@@ -26,6 +26,8 @@ class Text(models.Model):
     char_start = models.IntegerField(null=True, blank=True)
     char_end = models.IntegerField(null=True, blank=True)
     search_vector = models.TextField(blank=True)
+    # BGE-M3 sparse 词级权重 {token_id_str: weight}，用于 sparse lexical 检索（替代/增强 PG FTS）
+    sparse_weights = models.JSONField(default=dict, blank=True)
     citation_key = models.CharField(max_length=32, db_index=True)
     indexed_at = models.DateTimeField(null=True, blank=True)
 

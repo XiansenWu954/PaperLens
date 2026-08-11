@@ -83,6 +83,7 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
     chunk_count = serializers.SerializerMethodField()
     ingestion_status = serializers.SerializerMethodField()
     latest_ingestion_job_id = serializers.SerializerMethodField()
+    latest_ingestion_error = serializers.SerializerMethodField()
     embedding_model = serializers.SerializerMethodField()
     indexed_at = serializers.SerializerMethodField()
 
@@ -106,6 +107,7 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
             "notes",
             "ingestion_status",
             "latest_ingestion_job_id",
+            "latest_ingestion_error",
             "embedding_model",
             "indexed_at",
             "chunk_count",
@@ -132,6 +134,12 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
     def get_latest_ingestion_job_id(self, obj: ProjectPaper) -> int | None:
         job = self._latest_job(obj)
         return job.id if job else None
+
+    def get_latest_ingestion_error(self, obj: ProjectPaper) -> str:
+        job = self._latest_job(obj)
+        if job and job.status == "failed" and job.error_message:
+            return job.error_message
+        return ""
 
     def get_embedding_model(self, obj: ProjectPaper) -> str:
         chunk = obj.paper.chunks.order_by("-indexed_at", "-id").first()

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { listProjectChatSessions, projectChatStreamUrl, type ChatSession } from '../types'
+import CitationGraph from './CitationGraph.vue'
+import { listProjectChatSessions, projectChatStreamUrl, type ChatSession, type GraphData } from '../types'
 
 const props = defineProps<{ projectId: number }>()
 const emit = defineEmits<{ refreshed: [] }>()
@@ -15,7 +16,7 @@ type TraceEvent = {
   count?: number
   items?: Record<string, any>[]
 }
-type TranscriptItem = { role: ChatRole; content: string; events?: TraceEvent[] }
+type TranscriptItem = { role: ChatRole; content: string; events?: TraceEvent[]; graphData?: GraphData }
 
 const message = ref('')
 const busy = ref(false)
@@ -31,6 +32,8 @@ const prompts = [
   '比较这些论文的方法差异',
   '继续扩大论文范围',
   '生成 related work 草稿',
+  '刷新引用图谱并推荐先读',
+  '导出项目论文为 BibTeX',
 ]
 
 const connectionLabel = computed(() => {
@@ -102,12 +105,15 @@ async function send() {
     connection.value = 'open'
   }
   stream.onerror = () => {
+    // 无论 busy 状态都关闭流，避免 done 后的 onerror 误触发导致 EventSource 永久重连。
+    closeStream()
     if (!busy.value) return
     connection.value = 'error'
     const currentAssistant = transcript.value[assistantIndex]
-    error.value = currentAssistant?.content ? '连接中断，已保留当前输出。' : 'Agent Chat 连接失败，请确认后端正在运行。'
+    error.value = currentAssistant?.content
+      ? '连接中断，已保留当前输出。'
+      : 'Agent 连接失败，请确认后端服务正在运行且已配置 DEEPSEEK_API_KEY。'
     busy.value = false
-    closeStream()
     emit('refreshed')
   }
 
@@ -129,6 +135,10 @@ async function send() {
     stream.addEventListener(eventName, (event) => {
       const payload = parsePayload(event as MessageEvent)
       transcript.value[assistantIndex]?.events?.push(describeEvent(eventName, payload))
+      // graph 事件：把图谱数据存到消息上，供消息体内嵌入渲染
+      if (eventName === 'graph' && transcript.value[assistantIndex]) {
+        transcript.value[assistantIndex].graphData = payload as GraphData
+      }
       if (typeof payload.session_id === 'number') sessionId.value = payload.session_id
       if (eventName === 'error') {
         error.value = payload.message || 'Agent Chat 失败'
@@ -388,6 +398,10 @@ onBeforeUnmount(closeStream)
             {{ paper.created ? '新增' : '已存在' }} · {{ paper.title }}
           </span>
         </div>
+        <!-- 图谱嵌入：graph 事件触发的图谱直接在消息内渲染 -->
+        <div v-if="item.graphData && item.graphData.nodes?.length" class="inline-graph">
+          <CitationGraph :data="item.graphData" />
+        </div>
         <details v-if="item.role === 'assistant' && item.events?.length" class="trace-panel">
           <summary>{{ toolCallCount(item.events) }} tools · {{ evidenceFromEvents(item.events).length }} evidence</summary>
           <div class="events">
@@ -620,6 +634,16 @@ p {
 
 .trace-panel {
   margin-top: 8px;
+}
+
+.inline-graph {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  max-height: 360px;
+  overflow: hidden;
 }
 
 .events {

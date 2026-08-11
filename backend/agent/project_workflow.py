@@ -66,7 +66,8 @@ async def plan_expansion(state: ProjectWorkflowState) -> dict[str, Any]:
     await _event(state, "workflow_node", {"node": "plan_expansion", "status": "running"})
     question = state["question"].strip()
     queries = [_rewrite_query(question)]
-    await _event(state, "workflow_node", {"node": "plan_expansion", "status": "done", "queries": queries})
+    # §30.2: never persist the (rewritten) user question — node/status only.
+    await _event(state, "workflow_node", {"node": "plan_expansion", "status": "done"})
     return {"queries": queries}
 
 
@@ -209,16 +210,17 @@ def _save_report(project_id: int, question: str, content: str) -> int:
 
 
 async def _event(state: ProjectWorkflowState, event_type: str, payload: dict[str, Any]) -> None:
-    from api.models import ProjectRunEvent
+    # §30.1: unified EventPublisher — raw payloads never reach ProjectRunEvent.
+    from agent.event_publisher import EventPublisher
 
     run_id = state.get("run_id")
     if not run_id:
         return
-    await sync_to_async(ProjectRunEvent.objects.create)(
+    publisher = EventPublisher(
+        project_id=state.get("project_id"),
         run_id=run_id,
-        event_type=event_type,
-        payload=payload,
     )
+    await sync_to_async(publisher.publish)(event_type, payload)
     logger.info(
         "project workflow event",
         extra={

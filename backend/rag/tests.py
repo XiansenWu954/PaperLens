@@ -13,6 +13,48 @@ from rag.ingest import chunk_text, ingest_pdf_bytes
 from rag.store import NumpyVectorStore
 
 
+class NetworkGuardTest(TransactionTestCase):
+    """GPT v5: verify test environment has socket-level network-blocking guards."""
+
+    def test_hf_offline_env_set(self):
+        """HF_HUB_OFFLINE must be set in test mode (second layer protection)."""
+        import os
+        self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1",
+                         "HF_HUB_OFFLINE=1 must be set in test mode")
+
+    def test_transformers_offline_env_set(self):
+        """TRANSFORMERS_OFFLINE must be set in test mode."""
+        import os
+        self.assertEqual(os.environ.get("TRANSFORMERS_OFFLINE"), "1",
+                         "TRANSFORMERS_OFFLINE=1 must be set in test mode")
+
+    def test_embedding_provider_is_fake_in_tests(self):
+        """PAPERLENS_EMBEDDING_PROVIDER must resolve to fake in test mode."""
+        from django.conf import settings
+        self.assertEqual(settings.PAPERLENS_EMBEDDING_PROVIDER, "fake",
+                         "IS_TESTING must force fake embedding provider")
+
+    def test_outbound_connection_to_example_com_is_blocked(self):
+        """Canary: attempting to connect to https://example.com MUST be rejected
+        by the Network Guard (NetworkAccessBlocked), NOT by timeout/DNS/accidental
+        network failure."""
+        from config.test_runner import NetworkAccessBlocked, _guard_active
+        # Guard must be active in offline suite
+        self.assertTrue(_guard_active, "Network guard must be active in test mode")
+        import socket as _socket
+        # Direct attempt: should raise NetworkAccessBlocked immediately
+        with self.assertRaises(NetworkAccessBlocked):
+            _socket.create_connection(("example.com", 443), timeout=2)
+
+    def test_local_database_connection_still_works(self):
+        """Local PostgreSQL/Redis connections must NOT be blocked by the guard."""
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute("SELECT 1")
+            row = cur.fetchone()
+        self.assertEqual(row[0], 1)
+
+
 class ChunkTextTest(TransactionTestCase):
     def test_short_text_single_chunk(self):
         chunks = chunk_text("短文本")
@@ -86,6 +128,41 @@ class EmbeddingTest(TransactionTestCase):
         self.assertEqual(result.shape, (0, settings.PAPERLENS_EMBEDDING_DIM))
 
 
+class BGEM3ProviderTest(TransactionTestCase):
+    """BGE-M3 provider：dense + sparse 双路输出（mock BGEM3FlagModel）。"""
+
+    def test_encode_dense_sparse(self):
+        from rag.embedding import BGEM3EmbeddingProvider
+
+        fake_output = {
+            "dense_vecs": np.array([[0.6, 0.8, 0.0, 0.0]], dtype=np.float32),
+            "lexical_weights": [{"100": np.float32(0.5), "200": np.float32(0.3)}],
+        }
+        with mock.patch("rag.embedding.get_embedder") as ge:
+            ge.return_value.encode.return_value = fake_output
+            provider = BGEM3EmbeddingProvider("BAAI/bge-m3", dimension=4)
+            dense, sparse = provider.encode_dense_sparse(["hello world"])
+        self.assertEqual(dense.shape, (1, 4))
+        self.assertEqual(len(sparse), 1)
+        self.assertEqual(sparse[0]["100"], 0.5)
+        # 确认 np.float32 被转成纯 float（JSON 可序列化）
+        self.assertIsInstance(sparse[0]["100"], float)
+
+    def test_query_sparse(self):
+        from rag.embedding import BGEM3EmbeddingProvider
+
+        fake_output = {
+            "dense_vecs": np.array([[0.6, 0.8]], dtype=np.float32),
+            "lexical_weights": [{"42": np.float32(0.9)}],
+        }
+        with mock.patch("rag.embedding.get_embedder") as ge:
+            ge.return_value.encode.return_value = fake_output
+            provider = BGEM3EmbeddingProvider("BAAI/bge-m3", dimension=2)
+            qs = provider.encode_query_sparse("test query")
+        self.assertAlmostEqual(qs["42"], 0.9, places=5)
+
+
+
 class NumpyStoreTest(TransactionTestCase):
     def test_search_returns_topk(self):
         from rag.models import Text
@@ -139,7 +216,8 @@ class RetrieveEvidenceFilterTest(TransactionTestCase):
         for i in range(3):
             Text.objects.create(
                 paper=paper, docname=f"ft chunk{i}", chunk_index=i,
-                content=f"content {i}", embedding=[float(i), 0.0], citation_key="pqac-ft1",
+                content=f"content {i}", embedding=[float(i)] + [0.0]*1023, citation_key="pqac-ft1",
+                embedding_model="fake-hash-embedding", embedding_version="fake-hash-embedding:v1",
             )
 
         async def fake_rcs(question, text):
@@ -149,7 +227,7 @@ class RetrieveEvidenceFilterTest(TransactionTestCase):
             return e
 
         # mock embed 返回与测试 embedding(2维) 匹配的查询向量
-        with mock.patch("rag.retrieval.embed", return_value=np.array([[1.0, 0.0]])), \
+        with mock.patch("rag.retrieval.embed", return_value=np.array([[1.0] + [0.0]*1023])), \
              mock.patch("rag.retrieval._rcs_summary", fake_rcs):
             from rag.retrieval import retrieve_evidence
             result = asyncio.run(retrieve_evidence("q", paper_ids=[paper.id]))
@@ -163,7 +241,8 @@ class RetrieveEvidenceFilterTest(TransactionTestCase):
         paper = upsert_paper({"arxiv_id": "9999.99998", "title": "Keep Test", "year": 2024})
         Text.objects.create(
             paper=paper, docname="kt chunk0", chunk_index=0,
-            content="good", embedding=[1.0, 0.0], citation_key="pqac-kt1",
+            content="good", embedding=[1.0] + [0.0]*1023, citation_key="pqac-kt1",
+                embedding_model="fake-hash-embedding", embedding_version="fake-hash-embedding:v1",
         )
 
         async def fake_rcs(question, text):
@@ -172,7 +251,7 @@ class RetrieveEvidenceFilterTest(TransactionTestCase):
             e.summary = "高度相关"
             return e
 
-        with mock.patch("rag.retrieval.embed", return_value=np.array([[1.0, 0.0]])), \
+        with mock.patch("rag.retrieval.embed", return_value=np.array([[1.0] + [0.0]*1023])), \
              mock.patch("rag.retrieval._rcs_summary", fake_rcs):
             from rag.retrieval import retrieve_evidence
             result = asyncio.run(retrieve_evidence("q", paper_ids=[paper.id]))
@@ -192,16 +271,32 @@ class PdfIngestBytesTest(TransactionTestCase):
             "compute embeddings, and persist Text rows for project-scoped retrieval. "
         ) * 4
         pdf_bytes = _simple_pdf_bytes(text)
-        fake_vecs = np.ones((1, 4), dtype=np.float32)
+        fake_vecs = np.ones((1, 1024), dtype=np.float32)
 
-        with mock.patch("rag.ingest.embed", return_value=fake_vecs):
+        # Mock BOTH embed (non-BGE-M3 path) and get_provider (BGE-M3 dense+sparse
+        # path) so the test is deterministic regardless of which embedding provider
+        # is active (fake in unit-test env, BGE-M3 in Docker with FlagEmbedding).
+        class _FakeProvider:
+            model_name = "fake-test"
+            dimension = 1024
+            version = "fake-test:dim1024"
+            def encode_dense_sparse(self, texts):
+                return fake_vecs, [{} for _ in texts]
+            def encode(self, texts, input_type="document"):
+                return fake_vecs
+
+        with mock.patch("rag.ingest.embed", return_value=fake_vecs), \
+             mock.patch("rag.embedding.get_provider", return_value=_FakeProvider()), \
+             mock.patch("rag.ingest._parse_pdf_with_docling", return_value=("", [])):
+            # Docling mocked to skip HF download; pypdf fallback handles the test PDF.
             count = asyncio.run(ingest_pdf_bytes(paper, pdf_bytes))
 
         self.assertEqual(count, 1)
         chunk = Text.objects.get(paper=paper)
         self.assertIn("PDF ingestion should parse", chunk.content)
         self.assertTrue(chunk.citation_key.startswith("pqac-"))
-        self.assertEqual(chunk.embedding, [1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(len(chunk.embedding), 1024)
+        self.assertTrue(all(v == 1.0 for v in chunk.embedding[:4]))
         self.assertEqual(chunk.page_start, 1)
         self.assertEqual(chunk.page_end, 1)
         self.assertGreaterEqual(chunk.char_end, chunk.char_start)
@@ -236,7 +331,8 @@ class HybridRetrievalTest(TransactionTestCase):
             chunk_index=0,
             content="Postgres full text search uses tsvector and tsquery for exact lexical retrieval.",
             search_vector="Postgres full text search tsvector tsquery exact lexical retrieval",
-            embedding=[0.0, 1.0],
+            embedding=[0.0] + [1.0] + [0.0]*1022, embedding_model="fake",
+            embedding_version="fake:v1",
             citation_key="pqac-lexical",
         )
         Text.objects.create(
@@ -245,7 +341,8 @@ class HybridRetrievalTest(TransactionTestCase):
             chunk_index=1,
             content="Unrelated dense candidate",
             search_vector="unrelated dense candidate",
-            embedding=[1.0, 0.0],
+            embedding=[1.0] + [0.0]*1023, embedding_model="fake",
+            embedding_version="fake:v1",
             citation_key="pqac-dense",
         )
 

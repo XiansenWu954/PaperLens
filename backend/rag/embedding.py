@@ -89,24 +89,119 @@ class FakeEmbeddingProvider:
             rows.append(_hash_embedding(f"{input_type}:{text}", self.dimension))
         return np.array(rows, dtype=np.float32)
 
+    def encode_sparse(self, texts: list[str]) -> list[dict[str, float]]:
+        """Fake sparse：基于 token hash 的伪词级权重，供测试对齐接口。"""
+        result: list[dict[str, float]] = []
+        for text in texts:
+            tokens = [t for t in text.lower().split() if t]
+            weights: dict[str, float] = {}
+            for i, tok in enumerate(tokens[:128]):
+                weights[str(hash(tok) % 100000)] = 1.0 / (i + 1)
+            result.append(weights)
+        return result
+
+
+@dataclass
+class BGEM3EmbeddingProvider:
+    """BGE-M3 provider：同时输出 dense（向量检索）+ sparse（词级权重，替代 PG FTS）。
+
+    一个模型支撑 hybrid 检索的三路：dense 召回 + sparse lexical 召回 + RRF 融合。
+    sparse 输出为 {token_id_str: weight}，存入 Text.sparse_weights。
+    """
+
+    model_name: str = "BAAI/bge-m3"
+    dimension: int = 1024
+    version: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.version:
+            self.version = f"{self.model_name}:dim{self.dimension}:dense+sparse"
+
+    def _get_model(self):
+        return get_embedder(self.model_name)
+
+    def encode(self, texts: list[str], *, input_type: str = "document") -> np.ndarray:
+        """仅返回 dense 向量（向后兼容现有 embed() 调用）。"""
+        if not texts:
+            return np.zeros((0, self.dimension), dtype=np.float32)
+        model = self._get_model()
+        logger.info(
+            "embedding batch started",
+            extra={
+                "event": "embedding_batch_started",
+                "embedding_model": self.model_name,
+                "embedding_dim": self.dimension,
+                "input_type": input_type,
+                "text_count": len(texts),
+            },
+        )
+        output = model.encode(texts, return_dense=True, return_sparse=False, return_colbert_vecs=False)
+        arr = np.array(output["dense_vecs"], dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.shape[1] != self.dimension:
+            logger.warning(
+                "embedding dimension differs from configured index",
+                extra={
+                    "event": "embedding_dimension_mismatch",
+                    "configured_dim": self.dimension,
+                    "actual_dim": int(arr.shape[1]),
+                },
+            )
+        return arr
+
+    def encode_dense_sparse(self, texts: list[str]) -> tuple[np.ndarray, list[dict[str, float]]]:
+        """同时返回 dense 向量和 sparse 词级权重（hybrid 入库用）。"""
+        if not texts:
+            return np.zeros((0, self.dimension), dtype=np.float32), []
+        model = self._get_model()
+        logger.info(
+            "embedding batch started (dense+sparse)",
+            extra={
+                "event": "embedding_batch_started",
+                "embedding_model": self.model_name,
+                "embedding_dim": self.dimension,
+                "text_count": len(texts),
+            },
+        )
+        output = model.encode(texts, return_dense=True, return_sparse=True, return_colbert_vecs=False)
+        dense = np.array(output["dense_vecs"], dtype=np.float32)
+        if dense.ndim == 1:
+            dense = dense.reshape(1, -1)
+        # lexical_weights 是 list[dict[str, np.float32]]，转成纯 float
+        sparse = [
+            {tok: float(w) for tok, w in weights.items()}
+            for weights in output["lexical_weights"]
+        ]
+        return dense, sparse
+
+    def encode_query_sparse(self, text: str) -> dict[str, float]:
+        """单条 query 的 sparse 权重（检索端打分用）。"""
+        _dense, sparse_list = self.encode_dense_sparse([text])
+        return sparse_list[0] if sparse_list else {}
+
 
 def get_embedder(model_name: str | None = None):
-    """Return the lazily loaded SentenceTransformer model.
+    """Return the lazily loaded embedding model.
 
+    BGE-M3 走 FlagEmbedding 的 BGEM3FlagModel（支持 dense+sparse）；其它走 SentenceTransformer。
     Tests patch this function directly, so it intentionally remains part of the
     public module API.
     """
 
     global _embedder
     if _embedder is None:
-        from sentence_transformers import SentenceTransformer
-
         resolved = model_name or _setting("PAPERLENS_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
         logger.info(
             "loading embedding model",
             extra={"event": "embedding_model_load_started", "embedding_model": resolved},
         )
-        _embedder = SentenceTransformer(resolved)
+        if "bge-m3" in resolved.lower():
+            from FlagEmbedding import BGEM3FlagModel
+            _embedder = BGEM3FlagModel(resolved, use_fp16=False)
+        else:
+            from sentence_transformers import SentenceTransformer
+            _embedder = SentenceTransformer(resolved)
     return _embedder
 
 
@@ -118,6 +213,10 @@ def get_provider() -> EmbeddingProvider:
     dim = int(_setting("PAPERLENS_EMBEDDING_DIM", 1024))
     if provider_name in {"fake", "fake-hash", "test"}:
         _provider = FakeEmbeddingProvider(dimension=dim)
+    elif provider_name in {"bge-m3", "bgem3"}:
+        model_name = str(_setting("PAPERLENS_EMBEDDING_MODEL", "BAAI/bge-m3"))
+        version = str(_setting("PAPERLENS_EMBEDDING_VERSION", f"{model_name}:dim{dim}:dense+sparse"))
+        _provider = BGEM3EmbeddingProvider(model_name=model_name, dimension=dim, version=version)
     else:
         model_name = str(_setting("PAPERLENS_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B"))
         version = str(

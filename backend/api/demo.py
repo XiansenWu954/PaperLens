@@ -39,8 +39,20 @@ DEMO_PAPERS = [
 ]
 
 
-def seed_demo_project(title: str | None = None, *, reuse: bool = True, status: str = "active") -> dict:
-    """Create or refresh a self-contained demo workspace without network calls."""
+def seed_demo_project(
+    title: str | None = None,
+    *,
+    reuse: bool = True,
+    status: str = "active",
+    reset: bool = False,
+) -> dict:
+    """Create or refresh a self-contained demo workspace without network calls.
+
+    ``reset=True`` (with ``reuse=True``) clears accumulated runs/sessions/reports
+    before re-seeding, so each eval case starts from a known snapshot instead of
+    inheriting state from a prior run. Default ``False`` preserves all existing
+    callers. See ``api.fixtures.reset_project_state`` for what is cleared.
+    """
 
     target_title = title or DEMO_PROJECT_TITLE
     project = None
@@ -57,6 +69,9 @@ def seed_demo_project(title: str | None = None, *, reuse: bool = True, status: s
             status=status,
         )
     else:
+        if reset:
+            from .fixtures import reset_project_state
+            reset_project_state(project.id)
         project.description = "Demo project for PaperLens Agent resume showcase."
         project.status = status
         project.save(update_fields=["description", "status", "updated_at"])

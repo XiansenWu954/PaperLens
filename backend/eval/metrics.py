@@ -61,8 +61,39 @@ def _llm_judge(question: str, report: str, rubric: str) -> dict:
         return {"score": 0.0, "reason": "解析失败"}
 
 
-def faithfulness(question: str, report: str) -> float:
-    """综述忠实度：每条论断是否有来源引用支撑（0-1）。"""
+def faithfulness(question: str, report: str, retrieval_context: list[str] | None = None) -> float:
+    """综述忠实度：每条论断是否有来源支撑（0-1）。
+
+    优先用 DeepEval FaithfulnessMetric（RAGAS 两步法：拆 claim → 逐条对 context 验证），
+    judge 走 DeepSeek。若 DeepEval 不可用或 key 缺失，退回粗糙 LLM-judge rubric。
+    """
+    if retrieval_context is not None:
+        try:
+            from .judge import make_judge, judge_available
+
+            if judge_available():
+                from deepeval.metrics import FaithfulnessMetric
+                from deepeval.test_case import LLMTestCase
+
+                metric = FaithfulnessMetric(
+                    threshold=0.5, model=make_judge(), include_reason=True, async_mode=False
+                )
+                test_case = LLMTestCase(
+                    input=question,
+                    actual_output=report,
+                    retrieval_context=retrieval_context,
+                )
+                metric.measure(test_case)
+                logger.info(
+                    "faithfulness(deepeval) score=%.2f reason=%s",
+                    metric.score,
+                    (metric.reason or "")[:80],
+                )
+                return float(metric.score)
+        except Exception as exc:
+            logger.warning("deepeval faithfulness 失败，退回 rubric: %s", exc.__class__.__name__)
+
+    # fallback：粗糙 LLM-judge rubric
     rubric = (
         "评估综述中事实性论断被引用/来源支撑的比例。"
         "0.0=全无引用支撑或大量编造，1.0=几乎所有论断有明确来源（论文标题/年份/作者）。"

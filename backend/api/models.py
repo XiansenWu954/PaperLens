@@ -159,6 +159,47 @@ class ReportVersion(models.Model):
         ordering = ["-created_at", "-id"]
 
 
+class PaperRelation(models.Model):
+    """两篇论文之间的引用语境关系（对齐 Scite 的 smart citations）。
+
+    label 标注 A 引用 B 时的语境：supporting（支持）/ contradicting（反对）/ mentioning（提及）。
+    由 LLM 基于 referenced_works + 摘要做轻量分类，结果缓存。
+    """
+
+    LABEL_CHOICES = [
+        ("supporting", "Supporting"),
+        ("contradicting", "Contradicting"),
+        ("mentioning", "Mentioning"),
+        ("unanalyzed", "Unanalyzed"),
+    ]
+
+    project = models.ForeignKey(
+        ResearchProject, related_name="paper_relations", on_delete=models.CASCADE
+    )
+    citing_paper = models.ForeignKey(
+        "papers.Paper", related_name="outgoing_relations", on_delete=models.CASCADE
+    )
+    cited_paper = models.ForeignKey(
+        "papers.Paper", related_name="incoming_relations", on_delete=models.CASCADE
+    )
+    label = models.CharField(max_length=16, choices=LABEL_CHOICES, default="unanalyzed")
+    context = models.TextField(blank=True)
+    confidence = models.FloatField(default=0.0)
+    analyzed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "citing_paper", "cited_paper"],
+                name="uniq_paper_relation",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"PaperRelation({self.citing_paper_id}->{self.cited_paper_id}, {self.label})"
+
+
 class PaperIngestionJob(models.Model):
     """Background PDF ingestion job for one project paper."""
 

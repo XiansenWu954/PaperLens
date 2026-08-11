@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectsStore } from '../stores/projects'
+import { describeError } from '../types'
 
 const router = useRouter()
 const store = useProjectsStore()
@@ -20,7 +21,7 @@ async function create() {
     const project = await store.addProject(title.value.trim(), description.value.trim())
     router.push(`/projects/${project.id}`)
   } catch (error) {
-    localError.value = error instanceof Error ? error.message : '创建项目失败'
+    localError.value = describeError(error, '创建项目失败')
   } finally {
     busy.value = false
   }
@@ -33,7 +34,7 @@ async function seed() {
     const project = await store.seedDemo()
     router.push(`/projects/${project.id}`)
   } catch (error) {
-    localError.value = error instanceof Error ? error.message : '创建演示项目失败'
+    localError.value = describeError(error, '创建演示项目失败')
   } finally {
     busy.value = false
   }
