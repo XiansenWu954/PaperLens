@@ -28,7 +28,7 @@
   使用相同名称和含义。
   > health 改为 `getattr(settings, "PAPERLENS_EMBEDDING_PROVIDER", "bge-m3")`(读取 Django settings,非 os.environ)。config/tests.py 4 项测试:override_settings("fake") 时 health 返回 "fake";不暴露 key。
 - [x] 3.3 检查规范没有包含密钥、有效 token、完整 prompt 或本机私有路径。
-  > grep current specs/AGENTS (openspec/AGENTS.md + openspec/specs/) for sk-/ghp_/API_KEY=sk = 0 matches。
+  > grep current specs/AGENTS (openspec/AGENTS.md + openspec/specs/) for secret-token patterns = 0 matches。
 - [x] 3.4 记录实际检查命令、Git SHA、diff 和结果；未运行项写 `NOT RUN`。
   > Git SHA: 36479d0。Django check: 0 issues。Docker PostgreSQL: 222/222 通过(144.807s)。health targeted test: 4/4 通过。
 

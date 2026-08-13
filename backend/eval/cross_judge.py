@@ -6,7 +6,7 @@
 配置(环境变量):
     EVAL_CROSS_JUDGE_MODEL=gpt-4o-mini
     EVAL_CROSS_JUDGE_BASE_URL=https://api.openai.com/v1
-    EVAL_CROSS_JUDGE_API_KEY=sk-...
+    EVAL_CROSS_JUDGE_API_KEY=<your-key>
 不配置时 cross_judge 不可用,报告只输出 self-judge 分数(并标注 self-judge 风险)。
 """
 from __future__ import annotations

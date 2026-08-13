@@ -240,8 +240,28 @@ class ProjectPaperEndpointTest(TestCase):
     def test_pdf_upload_endpoint_creates_eager_ingestion_job(self):
         ProjectPaper.objects.create(project=self.project, paper=self.paper, status="included")
 
-        async def fake_ingest_pdf_bytes(*_args, **_kwargs):
-            return 2
+        async def fake_ingest_pdf_bytes(paper, pdf_bytes, *, index_version=None, **kwargs):
+            # Tasks 4.3: the activation transaction verifies persisted chunks
+            # against the reported count — the mock must persist real rows.
+            from asgiref.sync import sync_to_async
+            from rag.embedding import embedding_metadata
+            from rag.models import Text
+
+            meta = embedding_metadata()
+
+            def _write():
+                for i in range(2):
+                    Text.objects.create(
+                        paper=paper, index_version=index_version,
+                        docname=f"fake chunk{i}", chunk_index=i, content="fake",
+                        embedding=[0.0] * 1024,
+                        embedding_model=str(meta["embedding_model"]),
+                        embedding_dim=int(meta["embedding_dim"]),
+                        embedding_version=str(meta["embedding_version"]),
+                        content_hash=f"h{i}", citation_key=f"pqac-f{i}")
+                return 2
+
+            return await sync_to_async(_write)()
 
         pdf = SimpleUploadedFile("paper.pdf", b"%PDF-1.4 fake", content_type="application/pdf")
         with mock.patch("api.tasks.ingest_pdf_bytes", fake_ingest_pdf_bytes):

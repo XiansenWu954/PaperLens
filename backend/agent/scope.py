@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.db.models import QuerySet
+from django.db.models import F, Q, QuerySet
 
 from api.models import ProjectPaper
 from papers.models import Paper
@@ -104,9 +104,13 @@ class ProjectScopeResolver:
 
         paper_ids=None -> full evidence scope; [] -> empty queryset (fail closed);
         otherwise the subset is intersected with the evidence scope.
-        active_only keeps rows whose embedding MODEL + VERSION match the CURRENT
-        active index (embedding_metadata); stale chunks never reach evidence
-        producers (§20.2 — the filter lives here, not only at resolution time).
+        active_only keeps rows whose embedding MODEL + VERSION + DIM match the
+        CURRENT active index (embedding_metadata) AND whose own index version is
+        the active PaperIndexVersion with compatible embedding metadata
+        (ING-B-CX-05 P0: active_only must gate on the version row's status, not
+        just matching model/version columns). Stale/building chunks never reach
+        evidence producers (§20.2 — the filter lives here, not only at
+        resolution time).
         """
         ids = self._evidence_paper_ids(paper_ids)
         if not ids:
@@ -115,8 +119,15 @@ class ProjectScopeResolver:
         if active_only:
             meta = _active_embedding_meta()
             qs = qs.filter(
+                index_version__status="active",
                 embedding_model=meta["embedding_model"],
                 embedding_version=meta["embedding_version"],
+                embedding_dim=meta["embedding_dim"],
+            ).filter(
+                # chunk metadata must be consistent with its own version row
+                Q(embedding_model=F("index_version__embedding_model"))
+                & Q(embedding_version=F("index_version__embedding_version"))
+                & Q(embedding_dim=F("index_version__embedding_dim"))
             )
         return qs
 

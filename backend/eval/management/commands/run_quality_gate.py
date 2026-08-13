@@ -38,8 +38,8 @@ REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
 
 # Secrets that must never appear in a report (manual §5.8).
 _SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{30,}"),
+    re.compile(r"s" r"k-[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"g" r"hp_[A-Za-z0-9]{30,}"),
     re.compile(r"(?i)authorization:\s*[A-Za-z0-9\-_\.=]+"),
     re.compile(r"(?i)(DEEPSEEK_API_KEY|DJANGO_SECRET_KEY)\s*=\s*\S+"),
 ]

@@ -366,6 +366,7 @@ class ScopeFixtureMixin:
         # (fake in tests). Fixture chunks carry the ACTIVE version so resolver
         # semantics are real without weakening production constraints; the
         # inactive-version case is created explicitly in the citation tests.
+        # Tasks 2.2: every fixture Text belongs to an immutable index version.
         meta = _active_embedding_meta()
         active_model = str(meta["embedding_model"])
         active_version = str(meta["embedding_version"])
@@ -376,8 +377,11 @@ class ScopeFixtureMixin:
             title="Own Included Paper", abstract="OWN_ABSTRACT selective state spaces.",
             year=2024, arxiv_id="own-inc-1", referenced_works=["W-shared-1", "W-own-a"])
         ProjectPaper.objects.create(project=self.proj_a, paper=self.paper_own, status="included")
+        self.version_own = self._make_active_version(
+            self.paper_own, active_model, active_version)
         self.text_own = Text.objects.create(
-            paper=self.paper_own, docname="own chunk 0", chunk_index=0,
+            paper=self.paper_own, index_version=self.version_own,
+            docname="own chunk 0", chunk_index=0,
             content="OWN_SENTINEL selective state space model SSM",
             embedding=_e1024(1.0), embedding_model=active_model, embedding_dim=1024,
             embedding_version=active_version, content_hash="h_own",
@@ -387,8 +391,11 @@ class ScopeFixtureMixin:
             title="Foreign Paper B", abstract="FOREIGN_ABSTRACT graph attention GAT.",
             year=2023, arxiv_id="foreign-inc-1", referenced_works=["W-shared-1", "W-foreign-b"])
         ProjectPaper.objects.create(project=self.proj_b, paper=self.paper_foreign, status="included")
+        self.version_foreign = self._make_active_version(
+            self.paper_foreign, active_model, active_version)
         self.text_foreign = Text.objects.create(
-            paper=self.paper_foreign, docname="foreign chunk 0", chunk_index=0,
+            paper=self.paper_foreign, index_version=self.version_foreign,
+            docname="foreign chunk 0", chunk_index=0,
             content="FOREIGN_SENTINEL graph attention network transformer",
             embedding=_e1024(2.0), embedding_model=active_model, embedding_dim=1024,
             embedding_version=active_version, content_hash="h_foreign",
@@ -398,8 +405,11 @@ class ScopeFixtureMixin:
             title="Excluded Paper", abstract="EXCLUDED_ABSTRACT.", year=2022, arxiv_id="excl-1",
             referenced_works=["W-shared-1"])
         ProjectPaper.objects.create(project=self.proj_a, paper=self.paper_excluded, status="excluded")
+        self.version_excluded = self._make_active_version(
+            self.paper_excluded, active_model, active_version)
         self.text_excluded = Text.objects.create(
-            paper=self.paper_excluded, docname="excluded chunk 0", chunk_index=0,
+            paper=self.paper_excluded, index_version=self.version_excluded,
+            docname="excluded chunk 0", chunk_index=0,
             content="EXCLUDED_SENTINEL excluded content",
             embedding=_e1024(3.0), embedding_model=active_model, embedding_dim=1024,
             embedding_version=active_version, content_hash="h_excluded",
@@ -408,8 +418,11 @@ class ScopeFixtureMixin:
         self.paper_unlinked = Paper.objects.create(
             title="Unlinked Global Paper", abstract="UNLINKED_ABSTRACT.", year=2021, arxiv_id="unlink-1",
             referenced_works=["W-shared-1", "W-unlinked-c"])
+        self.version_unlinked = self._make_active_version(
+            self.paper_unlinked, active_model, active_version)
         self.text_unlinked = Text.objects.create(
-            paper=self.paper_unlinked, docname="unlinked chunk 0", chunk_index=0,
+            paper=self.paper_unlinked, index_version=self.version_unlinked,
+            docname="unlinked chunk 0", chunk_index=0,
             content="UNLINKED_SENTINEL unlinked content",
             embedding=_e1024(4.0), embedding_model=active_model, embedding_dim=1024,
             embedding_version=active_version, content_hash="h_unlinked",
@@ -418,14 +431,32 @@ class ScopeFixtureMixin:
         # STALE-index chunk on the own paper (§20.2): real id + hash, but a
         # different (inactive) embedding model/version. Evidence producers must
         # never surface it as fulltext.
+        self.version_own_stale = self._make_version(
+            self.paper_own, "stale-model", "stale-version", status="superseded")
         self.text_own_stale = Text.objects.create(
-            paper=self.paper_own, docname="own stale chunk", chunk_index=1,
+            paper=self.paper_own, index_version=self.version_own_stale,
+            docname="own stale chunk", chunk_index=1,
             content="OWN_STALE_SENTINEL stale content",
             embedding=_e1024(9.0), embedding_model="stale-model", embedding_dim=1024,
             embedding_version="stale-version", content_hash="h_own_stale",
             citation_key="pqac-own-stale", search_vector="own stale content")
 
         self.nonexistent_id = 999999
+
+    def _make_version(self, paper, model, version, status="building"):
+        from rag.models import PaperIndexVersion
+        import hashlib as _h
+        identity = _h.sha256(
+            f"{paper.id}|{model}|{version}".encode()).hexdigest()[:64]
+        return PaperIndexVersion.objects.create(
+            paper=paper, status=status,
+            source_sha256=identity, pipeline_signature="scope-fixture-v1",
+            parser_identity="scope-fixture", chunk_config_hash="",
+            embedding_model=model, embedding_version=version,
+            embedding_dim=1024)
+
+    def _make_active_version(self, paper, model, version):
+        return self._make_version(paper, model, version, status="active")
 
     def _assert_sentinel_absent(self, result, sentinel, where="result"):
         raw = json.dumps(result, default=str)
@@ -512,8 +543,10 @@ class EvidenceEnvelopeSchemaTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, T
             title="Own Second Paper", abstract="OWN2_ABSTRACT transformers.",
             year=2017, arxiv_id="own-env-2")
         ProjectPaper.objects.create(project=self.proj_a, paper=self.paper_own2, status="included")
+        _own2_v = self._make_active_version(
+            self.paper_own2, str(meta["embedding_model"]), str(meta["embedding_version"]))
         Text.objects.create(
-            paper=self.paper_own2, docname="own2 env chunk", chunk_index=0,
+            paper=self.paper_own2, index_version=_own2_v, docname="own2 env chunk", chunk_index=0,
             content="OWN2_ENV_SENTINEL transformer self-attention",
             embedding=_e1024(6.0), embedding_model=meta["embedding_model"], embedding_dim=1024,
             embedding_version=meta["embedding_version"], content_hash="h_own2_env",
@@ -796,6 +829,133 @@ class QueryProjectRagScopeTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Tra
         self.assertNotIn(self.text_own_stale.id, chunk_ids,
                          "stale-index chunk must never enter RAG evidence")
 
+    # -- ING-B-CX-05 (P0): active-only retrieval is a VERSION-STATUS gate ----
+
+    def _make_sentinel_version(self, status):
+        """Per-status PaperIndexVersion with the SAME embedding model/version/dim
+        as the active one + a sentinel chunk on paper_own (chunk_index=0 of that
+        version). Pre-fix these leak into candidates because the filter only
+        compared model/version columns; post-fix the version row's status gates."""
+        from rag.models import PaperIndexVersion, Text
+        meta = _active_embedding_meta()
+        active_v = str(meta["embedding_version"])
+        base = dict(embedding_model=str(meta["embedding_model"]),
+                    embedding_dim=1024, embedding_version=active_v,
+                    search_vector="sentinel selective state space")
+        v = PaperIndexVersion.objects.create(
+            paper=self.paper_own, status=status,
+            source_sha256=f"sha-{status}", pipeline_signature="cx05-p1",
+            embedding_version=active_v, embedding_model=base["embedding_model"],
+            embedding_dim=1024, chunk_count=1)
+        return v, Text.objects.create(
+            paper=self.paper_own, index_version=v, docname=f"{status} chunk",
+            chunk_index=0,
+            content=f"VERSION_SENTINEL_{status} selective state space",
+            embedding=_e1024(0.5), **base,
+            content_hash=f"h-{status}", citation_key="pqac-cx05")
+
+    def _assert_active_only_candidates(self, forbidden_status):
+        """Direct candidate-level probes of the active-only gate: the scoped
+        active_only queryset + the Python fallback candidates + (on PostgreSQL)
+        the raw pgvector/FTS SQL candidates. Every negative case asserts the
+        active sentinel is recalled (positive control) and the forbidden-status
+        sentinel is excluded on every surface."""
+        import numpy as np
+        from django.db import connection
+        from agent.scope import ProjectScopeResolver
+        from rag.retrieval import _postgres_hybrid_candidates, _python_hybrid_candidates
+        from rag.models import Text, PaperIndexVersion
+
+        meta = _active_embedding_meta()
+        forbidden_v, forbidden_chunk = self._make_sentinel_version(forbidden_status)
+        active_version = PaperIndexVersion.objects.get(
+            paper=self.paper_own, status="active")
+        active_chunk = Text.objects.filter(
+            paper=self.paper_own, index_version=active_version).first()
+        self.assertTrue(active_chunk, "positive control fixture: active chunk")
+        qvec = np.zeros(1024, dtype=np.float32)
+
+        # 1) scoped active_only queryset (used by read/compare/report/graph)
+        qs = ProjectScopeResolver(self.proj_a.id).chunks(
+            paper_ids=[self.paper_own.id], active_only=True)
+        qs_ids = set(qs.values_list("id", flat=True))
+        self.assertIn(active_chunk.id, qs_ids,
+                      "positive control: active chunk in active_only queryset")
+        self.assertNotIn(forbidden_chunk.id, qs_ids,
+                         f"{forbidden_status} chunk must never be in active_only queryset")
+        self.assertEqual(
+            set(Text.objects.filter(id__in=qs_ids)
+                .values_list("index_version_id", flat=True)),
+            {active_version.id},
+            "active_only queryset must carry only active-version ids")
+
+        # 2) Python fallback candidates
+        dense, lexical = _python_hybrid_candidates(
+            "selective state space sentinel", qvec, [self.paper_own.id],
+            50, 50, None, meta)
+        py_ids = {t.id for t in dense + lexical}
+        self.assertIn(active_chunk.id, py_ids,
+                      "positive control: active chunk in python candidates")
+        self.assertNotIn(forbidden_chunk.id, py_ids,
+                         f"{forbidden_status} chunk excluded from python candidates")
+        self.assertEqual(
+            {t.index_version_id for t in dense + lexical}, {active_version.id},
+            "python candidates must carry only active-version ids")
+
+        # 3) PostgreSQL dense+lexical SQL (live on the docker gate; static
+        #    predicate assertion on SQLite where the query cannot run)
+        if connection.vendor == "postgresql":
+            pg_dense, pg_lexical = _postgres_hybrid_candidates(
+                "selective state space sentinel", qvec, [self.paper_own.id],
+                50, 50, meta)
+            pg_ids = {t.id for t in pg_dense + pg_lexical}
+            self.assertIn(active_chunk.id, pg_ids,
+                          "positive control: active chunk in postgres candidates")
+            self.assertNotIn(forbidden_chunk.id, pg_ids,
+                             f"{forbidden_status} chunk excluded from postgres candidates")
+            self.assertEqual(
+                {t.index_version_id for t in pg_dense + pg_lexical},
+                {active_version.id},
+                "postgres candidates must carry only active-version ids")
+        else:
+            import inspect
+            from rag.retrieval import _postgres_dense_ids, _postgres_lexical_ids
+            src = inspect.getsource(_postgres_dense_ids) + \
+                inspect.getsource(_postgres_lexical_ids)
+            self.assertIn("piv.status = 'active'", src,
+                          "postgres SQL must gate on the version status row")
+            self.assertIn("t.embedding_model = piv.embedding_model", src,
+                          "postgres SQL must require chunk==version metadata")
+
+    def test_rag_active_positive_control(self):
+        """ING-B-CX-05 positive: with building/superseded/failed versions
+        present, the active sentinel is still the ONLY candidate."""
+        self.case_id = "RAG-ACTIVE-POSITIVE"
+        self.expected_pre_fix = "FAIL"
+        self._assert_active_only_candidates("building")
+
+    def test_rag_building_excluded(self):
+        """ING-B-CX-05: a building-version chunk with the SAME model/version as
+        active must never enter candidates."""
+        self.case_id = "RAG-BUILDING-EXCLUDED"
+        self.expected_pre_fix = "FAIL"
+        self._assert_active_only_candidates("building")
+
+    def test_rag_superseded_excluded(self):
+        """ING-B-CX-05: a superseded-version chunk with the SAME model/version
+        as active must never enter candidates."""
+        self.case_id = "RAG-SUPERSEDED-EXCLUDED"
+        self.expected_pre_fix = "FAIL"
+        self._assert_active_only_candidates("superseded")
+
+    def test_rag_failed_excluded(self):
+        """ING-B-CX-05: a failed-version chunk with the SAME model/version as
+        active must never enter candidates."""
+        self.case_id = "RAG-FAILED-EXCLUDED"
+        self.expected_pre_fix = "FAIL"
+        self._assert_active_only_candidates("failed")
+
+
     def test_python_store_scope_active(self):
         """§21.3: a prebuilt NumpyVectorStore may contain stale / foreign /
         out-of-scope Texts; the python candidate path must intersect dense
@@ -864,8 +1024,10 @@ class ComparePapersScopeTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Trans
             title="Own Second Paper", abstract="OWN2_ABSTRACT transformers.",
             year=2017, arxiv_id="own-2")
         ProjectPaper.objects.create(project=self.proj_a, paper=self.paper_own2, status="included")
+        _own2_v = self._make_active_version(
+            self.paper_own2, str(meta["embedding_model"]), str(meta["embedding_version"]))
         Text.objects.create(
-            paper=self.paper_own2, docname="own2 chunk 0", chunk_index=0,
+            paper=self.paper_own2, index_version=_own2_v, docname="own2 chunk 0", chunk_index=0,
             content="OWN2_SENTINEL transformer self-attention",
             embedding=_e1024(5.0), embedding_model=meta["embedding_model"], embedding_dim=1024,
             embedding_version=meta["embedding_version"], content_hash="h_own2",
@@ -1833,7 +1995,8 @@ class CitationSelfAssertionTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Tr
         payload_b["evidence_id"] = payload_a["evidence_id"]
         meta = _active_embedding_meta()
         extra = Text.objects.create(
-            paper=self.paper_own, docname="own dup-test chunk", chunk_index=3,
+            paper=self.paper_own, index_version=self.version_own,
+            docname="own dup-test chunk", chunk_index=3,
             content="OWN_DUP_SENTINEL duplicate-test content",
             embedding=_e1024(8.0), embedding_model=meta["embedding_model"],
             embedding_dim=1024, embedding_version=meta["embedding_version"],
@@ -2015,6 +2178,121 @@ class CitationSelfAssertionTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Tr
                       "envelope version mismatch must fail closed")
         self.assertEqual(cit.get("resolution_reason"), "envelope_version_mismatch")
 
+    # -- ING-B-CX-05 (P0): resolution requires an ACTIVE version row ----
+
+    def _make_status_chunk_and_envelope(self, status):
+        """Chunk on a {status} PaperIndexVersion carrying the SAME embedding
+        model/version/dim as the active one (so model/version column checks
+        alone would pass — the version ROW's status must gate) + its typed
+        envelope."""
+        from rag.models import PaperIndexVersion, Text
+        meta = _active_embedding_meta()
+        active_v = str(meta["embedding_version"])
+        v = PaperIndexVersion.objects.create(
+            paper=self.paper_own, status=status,
+            source_sha256=f"sha-{status}", pipeline_signature="cx05-p1",
+            embedding_version=active_v,
+            embedding_model=str(meta["embedding_model"]),
+            embedding_dim=1024, chunk_count=1)
+        chunk = Text.objects.create(
+            paper=self.paper_own, index_version=v, docname=f"{status} chunk",
+            chunk_index=0,
+            content=f"VERSION_SENTINEL_{status} selective state space",
+            embedding=_e1024(0.5), embedding_model=str(meta["embedding_model"]),
+            embedding_dim=1024, embedding_version=active_v,
+            content_hash=f"h-{status}", citation_key=f"pqac-cx05-{status}",
+            search_vector=f"{status} selective state space")
+        return chunk, self._fulltext_evidence(
+            chunk.paper_id, chunk.id, chunk.chunk_index, f"h-{status}",
+            marker=f"pqac-cx05-{status}")[0]
+
+    def _assert_status_unresolved(self, status):
+        """Active own chunk resolves (positive control); the {status}-version
+        chunk with identical model/version metadata must NOT."""
+        from agent.citations import CitationResolver
+        from agent.evidence import evidence_identity_key
+        chunk, item = self._make_status_chunk_and_envelope(status)
+        positive = self._fulltext_evidence(
+            self.text_own.paper_id, self.text_own.id, self.text_own.chunk_index,
+            "h_own", marker="pqac-own")[0]
+        resolutions = CitationResolver(self.proj_a.id).resolve([positive, item])
+        self.assertTrue(
+            resolutions[evidence_identity_key(positive)].reference_resolved,
+            "positive control: active-version chunk must resolve")
+        negative = resolutions[evidence_identity_key(item)]
+        self.assertIs(negative.reference_resolved, False,
+                      f"{status}-version chunk must not resolve")
+        self.assertEqual(negative.reason_code, "non_active_version")
+
+    def test_CIT_BUILDING_UNRESOLVED(self):
+        """ING-B-CX-05: a chunk on a BUILDING version (same model/version as
+        active) must not resolve — the version row status gates."""
+        self.case_id = "CIT-BUILDING-UNRESOLVED"
+        self.expected_pre_fix = "FAIL"
+        self._assert_status_unresolved("building")
+
+    def test_CIT_SUPERSEDED_UNRESOLVED(self):
+        """ING-B-CX-05: a chunk on a SUPERSEDED version (same model/version as
+        active) must not resolve."""
+        self.case_id = "CIT-SUPERSEDED-UNRESOLVED"
+        self.expected_pre_fix = "FAIL"
+        self._assert_status_unresolved("superseded")
+
+    def test_CIT_FAILED_UNRESOLVED(self):
+        """ING-B-CX-05: a chunk on a FAILED version (same model/version as
+        active) must not resolve."""
+        self.case_id = "CIT-FAILED-UNRESOLVED"
+        self.expected_pre_fix = "FAIL"
+        self._assert_status_unresolved("failed")
+
+    def test_CIT_INDEX_VERSION_METADATA_MISMATCH(self):
+        """ING-B-CX-05: chunk metadata must be consistent with its own version
+        row. An ACTIVE version row whose model differs from its chunk passes
+        the chunk-vs-active_meta check but must fail closed."""
+        self.case_id = "CIT-INDEX-VERSION-METADATA-MISMATCH"
+        self.expected_pre_fix = "FAIL"
+        from agent.citations import CitationResolver
+        from agent.evidence import evidence_identity_key
+        from papers.models import Paper
+        from rag.models import PaperIndexVersion, Text
+
+        meta = _active_embedding_meta()
+        active_v = str(meta["embedding_version"])
+        # one active version per paper is constrained — use a fresh paper
+        paper = Paper.objects.create(
+            title="Meta Mismatch Paper", abstract="META_MISMATCH_ABSTRACT.",
+            year=2024, arxiv_id="meta-mismatch-1")
+        ProjectPaper.objects.create(
+            project=self.proj_a, paper=paper, status="included")
+        v = PaperIndexVersion.objects.create(
+            paper=paper, status="active",
+            source_sha256="sha-meta", pipeline_signature="cx05-meta",
+            embedding_model="other-model", embedding_version=active_v,
+            embedding_dim=1024, chunk_count=1)
+        chunk = Text.objects.create(
+            paper=paper, index_version=v, docname="meta mismatch chunk",
+            chunk_index=0,
+            content="META_MISMATCH_SENTINEL selective state space",
+            embedding=_e1024(0.5), embedding_model=str(meta["embedding_model"]),
+            embedding_dim=1024, embedding_version=active_v,
+            content_hash="h-meta", citation_key="pqac-cx05-meta",
+            search_vector="meta mismatch selective state space")
+        item = self._fulltext_evidence(
+            chunk.paper_id, chunk.id, chunk.chunk_index, "h-meta",
+            marker="pqac-cx05-meta")[0]
+        positive = self._fulltext_evidence(
+            self.text_own.paper_id, self.text_own.id, self.text_own.chunk_index,
+            "h_own", marker="pqac-own")[0]
+        resolutions = CitationResolver(self.proj_a.id).resolve([positive, item])
+        self.assertTrue(
+            resolutions[evidence_identity_key(positive)].reference_resolved,
+            "positive control: active-version chunk must resolve")
+        negative = resolutions[evidence_identity_key(item)]
+        self.assertIs(negative.reference_resolved, False,
+                      "chunk/version metadata mismatch must fail closed")
+        self.assertEqual(negative.reason_code, "version_metadata_mismatch")
+
+
     def test_CIT_DUPLICATE_MARKER(self):
         """§20.3: resolution identity is the evidence_id — two candidates with
         the SAME marker are both retained (never first-wins); the valid one
@@ -2076,7 +2354,8 @@ class CitationSelfAssertionTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Tr
         self.expected_pre_fix = "PASS"
         meta = _active_embedding_meta()
         extra = Text.objects.create(
-            paper=self.paper_own, docname="own bare-test chunk", chunk_index=2,
+            paper=self.paper_own, index_version=self.version_own,
+            docname="own bare-test chunk", chunk_index=2,
             content="OWN_EXTRA_SENTINEL extra content",
             embedding=_e1024(7.0), embedding_model=meta["embedding_model"],
             embedding_dim=1024, embedding_version=meta["embedding_version"],
@@ -2479,8 +2758,10 @@ class MetadataBypassTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Transacti
             title="Own Second Paper", abstract="OWN2_ABSTRACT transformers.",
             year=2017, arxiv_id="own-policy-2")
         ProjectPaper.objects.create(project=self.proj_a, paper=own2, status="included")
+        _own2_v = self._make_active_version(
+            own2, str(meta["embedding_model"]), str(meta["embedding_version"]))
         own2_chunk = Text.objects.create(
-            paper=own2, docname="own2 policy chunk", chunk_index=0,
+            paper=own2, index_version=_own2_v, docname="own2 policy chunk", chunk_index=0,
             content="OWN2_POLICY_SENTINEL transformer self-attention",
             embedding=_e1024(6.0), embedding_model=meta["embedding_model"],
             embedding_dim=1024, embedding_version=meta["embedding_version"],
@@ -2707,8 +2988,10 @@ class MetadataBypassTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Transacti
             title="Own Second Paper", abstract="OWN2_ABSTRACT transformers.",
             year=2017, arxiv_id="own-policy-5")
         ProjectPaper.objects.create(project=self.proj_a, paper=own2, status="included")
+        _own2_v = self._make_active_version(
+            own2, str(meta["embedding_model"]), str(meta["embedding_version"]))
         own2_chunk = Text.objects.create(
-            paper=own2, docname="own2 omitted chunk", chunk_index=0,
+            paper=own2, index_version=_own2_v, docname="own2 omitted chunk", chunk_index=0,
             content="OWN2_OMIT_SENTINEL transformer self-attention",
             embedding=_e1024(6.0), embedding_model=meta["embedding_model"],
             embedding_dim=1024, embedding_version=meta["embedding_version"],
@@ -2940,8 +3223,10 @@ class MetadataBypassTest(ScopeFixtureMixin, NetworkGuardTestCaseMixin, Transacti
             title="Own Second Paper", abstract="OWN2_ABSTRACT transformers.",
             year=2017, arxiv_id="own-policy-arg")
         ProjectPaper.objects.create(project=self.proj_a, paper=own2, status="included")
+        _own2_v = self._make_active_version(
+            own2, str(meta["embedding_model"]), str(meta["embedding_version"]))
         own2_chunk = Text.objects.create(
-            paper=own2, docname="own2 arg chunk", chunk_index=0,
+            paper=own2, index_version=_own2_v, docname="own2 arg chunk", chunk_index=0,
             content="OWN2_ARG_SENTINEL transformer self-attention",
             embedding=_e1024(6.0), embedding_model=meta["embedding_model"],
             embedding_dim=1024, embedding_version=meta["embedding_version"],

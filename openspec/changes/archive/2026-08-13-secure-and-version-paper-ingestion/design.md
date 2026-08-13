@@ -52,6 +52,16 @@ reference one global build without exposing one project's job to another.
 Alternative rejected: making versions project-scoped would duplicate identical embeddings and
 permit inconsistent active evidence for the same global paper.
 
+Published versions are immutable. `active`, `superseded`, and `failed` versions retain their chunk
+sets for audit and rollback; all new chunk writes target a dedicated `building` version. A legacy
+compatibility adapter follows the same rule and may replace only chunks in its own building version.
+It may not defer this invariant until `IngestionService` exists. Paper-wide deletion such as
+`Text.objects.filter(paper=paper).delete()` is therefore outside the permitted design.
+
+`PaperIngestionJob.index_version` is an audit relationship. The implementation must prevent normal
+version lifecycle operations from silently nulling it. New jobs start with `attempt_count=0`; a
+worker increments the count when an execution attempt actually begins.
+
 ### 2. Use one acquisition boundary with injectable resolver and transport
 
 Create `SafePdfFetcher` in the RAG ingestion boundary. URL normalization accepts only HTTPS with no
@@ -92,6 +102,11 @@ marks the prior active version `superseded`, and marks the new version `active`.
 back the switch; the previous active row and chunks remain queryable. `ProjectScopeResolver`, RAG,
 read, compare, citation resolution, and Python fallback all filter through the active compatible
 version, not merely `embedding_version` strings.
+
+The legacy backfill is deterministic and model-free. It derives legacy provenance from persisted,
+ordered chunk content identities and reads the compatible embedding identity from explicit
+migration configuration. It does not instantiate an embedding provider, access a model cache, or
+silently replace missing configuration with a different selection rule.
 
 ### 5. Derive separate request and build identities
 
@@ -142,8 +157,13 @@ offers retry only when permitted, and keeps upload available when a new artifact
 - **Custom connection pinning is security-sensitive** -> isolate it behind a small fetcher, deny on
   ambiguous DNS/peer state, add injected and real-loopback adversarial tests, and keep HTTPS-only.
 - **Data migration may expose mixed historical vectors** -> create versions per paper/embedding
-  group, activate only the newest group compatible with current settings, and leave others
-  superseded.
+  group, activate only the newest group compatible with explicit migration settings, leave others
+  superseded, and prove deterministic output with historical-state migration tests.
+- **A compatibility writer may mutate published history** -> require building-only writes and
+  building-scoped replacement even before the centralized ingestion service is introduced.
+- **Nullable job/version links weaken incident reconstruction** -> retain referenced versions and
+  enforce the relationship at the database boundary unless a later OpenSpec change defines safe
+  garbage collection.
 - **Building versions increase storage** -> retain them for rollback in this change and report size;
   add retention only through a later specification.
 - **Worker death can leave `building` rows** -> unique build identity and retry claim rules resume or

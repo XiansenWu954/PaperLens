@@ -285,6 +285,31 @@ LOGGING = {
             "level": LOG_LEVEL,
             "propagate": False,
         },
+        # ING-D-CX-02: third-party default logs may contain full URLs / paths /
+        # raw exception bodies (httpx "HTTP Request: GET https://...",
+        # docling/pypdf parse details). They are silenced — all network /
+        # parse failures surface through PaperLens' own stable error_code +
+        # error_hash logs instead.
+        "httpx": {
+            "handlers": ["console"],
+            "level": "CRITICAL",
+            "propagate": False,
+        },
+        "httpcore": {
+            "handlers": ["console"],
+            "level": "CRITICAL",
+            "propagate": False,
+        },
+        "pypdf": {
+            "handlers": ["console"],
+            "level": "CRITICAL",
+            "propagate": False,
+        },
+        "docling": {
+            "handlers": ["console"],
+            "level": "CRITICAL",
+            "propagate": False,
+        },
     },
 }
 

@@ -18,6 +18,32 @@ from rag.embedding import embedding_metadata
 from agent.state import add
 
 
+def _active_version(paper):
+    """Test fixture: the CURRENT active index version for a paper.
+
+    Reuses an existing active row (the DB enforces one active version per
+    paper) or creates one carrying the fake provider's embedding metadata, so
+    active_only retrieval (ING-B-CX-05) can find chunks attached to it.
+    """
+    from rag.models import PaperIndexVersion
+
+    meta = embedding_metadata()
+    version = PaperIndexVersion.objects.filter(
+        paper=paper, status="active").order_by("-id").first()
+    if version is None:
+        version = PaperIndexVersion.objects.create(
+            paper=paper, status="active",
+            source_sha256="active-fixture",
+            pipeline_signature="test-active-v1",
+            parser_identity="test",
+            chunk_config_hash="test-v1",
+            embedding_model=meta["embedding_model"],
+            embedding_version=meta["embedding_version"],
+            embedding_dim=int(meta["embedding_dim"]),
+        )
+    return version
+
+
 class StateReducerTest(TransactionTestCase):
     def test_add_concatenates_lists(self):
         self.assertEqual(add(["a"], ["b"]), ["a", "b"])
@@ -478,11 +504,12 @@ class ProjectToolsExecutionTest(TransactionTestCase):
 
     def test_query_project_rag_rcs_timeout_uses_metadata_source_markers(self):
         from agent.project_tools import query_project_rag
-        from rag.embedding import embedding_metadata
         from rag.models import Text
 
+        _v_slow = _active_version(self.paper)
         Text.objects.create(
             paper=self.paper,
+            index_version=_v_slow,
             docname="Included Paper chunk 0",
             chunk_index=0,
             content="slow evidence",
@@ -586,11 +613,13 @@ class ComparePapersEvidenceTest(TransactionTestCase):
         # seed a couple of fulltext chunks for A and B (fake embeddings OK for structure test)
         from rag.models import Text
         _meta = embedding_metadata()
-        Text.objects.create(paper=self.paper_a, docname="a0", chunk_index=0, content="selective state space model scan mechanism",
+        _v_a = _active_version(self.paper_a)
+        _v_b = _active_version(self.paper_b)
+        Text.objects.create(paper=self.paper_a, index_version=_v_a, docname="a0", chunk_index=0, content="selective state space model scan mechanism",
                             embedding=[0.1]*1024, embedding_model=_meta["embedding_model"], embedding_dim=1024,
                             embedding_version=_meta["embedding_version"],
                             content_hash="h1", search_vector="Paper A selective state space", citation_key="pqac-a1")
-        Text.objects.create(paper=self.paper_b, docname="b0", chunk_index=0, content="self-attention scaled dot-product multi-head",
+        Text.objects.create(paper=self.paper_b, index_version=_v_b, docname="b0", chunk_index=0, content="self-attention scaled dot-product multi-head",
                             embedding=[0.2]*1024, embedding_model=_meta["embedding_model"], embedding_dim=1024,
                             embedding_version=_meta["embedding_version"],
                             content_hash="h2", search_vector="Paper B self-attention", citation_key="pqac-b1")
@@ -783,8 +812,9 @@ class ProjectHarnessToolRoutingTest(TransactionTestCase):
         from unittest import mock
 
         meta = embedding_metadata()
+        _v_mamba = _active_version(self.paper)
         Text.objects.create(
-            paper=self.paper, docname="mamba chunk", chunk_index=0,
+            paper=self.paper, index_version=_v_mamba, docname="mamba chunk", chunk_index=0,
             content="Mamba 使用选择性状态空间模型。",
             embedding=[1.0] + [0.0] * 1023,
             embedding_model=meta["embedding_model"], embedding_dim=1024,

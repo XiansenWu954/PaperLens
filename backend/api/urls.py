@@ -16,6 +16,7 @@ urlpatterns = [
     path("projects/<int:project_id>/papers/<int:paper_id>/pdf-upload", views.project_paper_pdf_upload, name="project_paper_pdf_upload"),
     path("projects/<int:project_id>/papers/<int:paper_id>/ingest", views.project_paper_ingest, name="project_paper_ingest"),
     path("projects/<int:project_id>/ingestion-jobs", views.project_ingestion_jobs, name="project_ingestion_jobs"),
+    path("projects/<int:project_id>/ingestion-jobs/<int:job_id>/retry", views.project_ingestion_job_retry, name="project_ingestion_job_retry"),
     path("projects/<int:project_id>/citation-graph", views.project_citation_graph, name="project_citation_graph"),
     path("projects/<int:project_id>/papers/<int:paper_a_id>/path/<int:paper_b_id>", views.project_paper_connection_path, name="project_paper_connection_path"),
     path("projects/<int:project_id>/paper-relations", views.project_paper_relations, name="project_paper_relations"),

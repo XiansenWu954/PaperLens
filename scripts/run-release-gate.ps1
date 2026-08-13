@@ -47,7 +47,7 @@ Write-Host "=== Phase 4: Real-model release gate ===" -ForegroundColor Cyan
 Write-Host "[0/3] Checking real-model prerequisites..." -ForegroundColor Cyan
 if (-not (Get-EnvKey)) {
     Write-Host "ERROR: DEEPSEEK_API_KEY is not configured." -ForegroundColor Red
-    Write-Host "Set it in backend/.env (DEEPSEEK_API_KEY=sk-...) or the host" -ForegroundColor Yellow
+    Write-Host "Set it in backend/.env (DEEPSEEK_API_KEY=<your-key>) or the host" -ForegroundColor Yellow
     Write-Host "environment before running the release gate." -ForegroundColor Yellow
     exit 1
 }

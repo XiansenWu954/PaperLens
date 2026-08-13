@@ -40,6 +40,8 @@ CHUNK_PAPER_MISMATCH = "chunk_paper_mismatch"
 HASH_MISMATCH = "hash_mismatch"
 ENVELOPE_VERSION_MISMATCH = "envelope_version_mismatch"
 VERSION_MISMATCH = "version_mismatch"
+NON_ACTIVE_VERSION = "non_active_version"
+VERSION_METADATA_MISMATCH = "version_metadata_mismatch"
 LEGACY_UNRESOLVED = "legacy_unresolved"
 METADATA = "metadata"
 
@@ -209,11 +211,23 @@ class CitationResolver:
         envelope_version = item.get("embedding_version")
         if envelope_version is None or str(envelope_version) != str(chunk.embedding_version):
             return CitationResolution(marker, False, ENVELOPE_VERSION_MISMATCH)
-        # …and the chunk must be on the CURRENT active index version.
+        # …and the chunk must be on the CURRENT active index version
+        # (ING-B-CX-05 P0: the version ROW's status must be active, not just
+        # matching model/version columns).
         if (
             chunk.embedding_version != active_meta["embedding_version"]
             or chunk.embedding_model != active_meta["embedding_model"]
+            or chunk.embedding_dim != active_meta["embedding_dim"]
         ):
             return CitationResolution(marker, False, VERSION_MISMATCH)
+        version_row = chunk.index_version
+        if version_row is None or version_row.status != "active":
+            return CitationResolution(marker, False, NON_ACTIVE_VERSION)
+        if (
+            str(chunk.embedding_model) != str(version_row.embedding_model)
+            or str(chunk.embedding_version) != str(version_row.embedding_version)
+            or int(chunk.embedding_dim) != int(version_row.embedding_dim)
+        ):
+            return CitationResolution(marker, False, VERSION_METADATA_MISMATCH)
 
         return CitationResolution(marker, True, RESOLVED)

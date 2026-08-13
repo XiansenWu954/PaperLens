@@ -201,6 +201,10 @@ async def _seed_project_from_generated_pdfs(project: ResearchProject) -> dict[st
             defaults={"status": "included", "added_by": "demo", "source_reason": "PDF RAG quality fixture"},
         )
         chunk_count = await ingest_pdf_bytes(paper, _simple_pdf_bytes(_long_enough_text(item["text"])))
+        # ING-B-CX-05 (P0): retrieval serves ONLY ACTIVE index versions.
+        # Ingest writes a building version; the eval fixture must ACTIVATE it
+        # (the atomic IngestionService build later formalizes this step).
+        await asyncio.to_thread(_activate_paper_version, paper)
         persisted = await asyncio.to_thread(lambda: Text.objects.filter(paper=paper).count())
         passed = chunk_count > 0 and persisted == chunk_count
         total_chunks += chunk_count
@@ -224,6 +228,24 @@ async def _seed_project_from_generated_pdfs(project: ResearchProject) -> dict[st
             },
         )
     return {"papers": rows, "chunk_count": total_chunks}
+
+
+def _activate_paper_version(paper) -> None:
+    """ING-B-CX-05: flip the paper's newest building version to active,
+    superseding any prior active version (one active version per paper)."""
+    from rag.models import PaperIndexVersion
+
+    building = (
+        PaperIndexVersion.objects.filter(paper=paper, status="building")
+        .order_by("-id")
+        .first()
+    )
+    if building is None:
+        return
+    PaperIndexVersion.objects.filter(paper=paper, status="active").update(
+        status="superseded")
+    building.status = "active"
+    building.save(update_fields=["status", "updated_at"])
 
 
 def _upsert_eval_paper(item: dict[str, Any], project_id: int) -> Paper:

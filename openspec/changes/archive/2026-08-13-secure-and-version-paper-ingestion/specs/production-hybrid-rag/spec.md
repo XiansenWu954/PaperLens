@@ -64,6 +64,32 @@ Each paper MUST use explicit immutable index versions and at most one active ver
 - **AND** every migrated `Text` row MUST reference an index version before the field becomes
   non-null.
 
+#### Scenario: Preserve published index versions
+
+- **GIVEN** a paper has an `active`, `superseded`, or `failed` index version
+- **WHEN** a compatibility ingestion path or a new ingestion request writes replacement chunks
+- **THEN** it MUST NOT insert, update, or delete chunks belonging to those published versions
+- **AND** new chunks MUST be written only to a dedicated `building` version
+- **AND** replacement cleanup MUST be scoped to that `building` version
+- **AND** the previous active and superseded versions MUST remain available for rollback and audit.
+
+#### Scenario: Deterministic legacy migration
+
+- **WHEN** legacy chunks are assigned to index versions
+- **THEN** grouping and active-version selection MUST depend only on explicit migration inputs and
+  persisted data
+- **AND** the migration MUST NOT initialize or download an embedding model
+- **AND** provider initialization failure MUST NOT silently change the selected active version
+- **AND** the same legacy fixture and configuration MUST produce the same version identities and
+  lifecycle states on every run.
+
+#### Scenario: Preserve ingestion audit linkage
+
+- **WHEN** a project ingestion job references a global index version
+- **THEN** normal replacement, supersession, or cleanup MUST NOT silently erase that relationship
+- **AND** deletion behavior MUST be enforced by a database constraint or an explicitly approved
+  retention policy.
+
 ### Requirement: Idempotent Ingestion Execution
 
 Project ingestion requests and global paper index builds MUST be idempotent across concurrent API
