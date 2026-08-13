@@ -16,6 +16,7 @@ from typing import Any
 
 from eval.agent_harness import run_project_agent_eval_sync, tool_policy_summary
 from eval.intent_eval import evaluate_intent_classifier
+from eval.tool_metrics import aggregate_tool_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,8 @@ def function_calling_metrics(intent_eval: dict[str, Any], harness_eval: dict[str
         (case for case in intent_eval["cases"] if case["id"] == "search_expand_cn"),
         None,
     )
+    # §6.2 tool-decision indicators, aggregated across the deterministic cases.
+    tool_decision = aggregate_tool_metrics(cases)
     return {
         "passed": policy["passed"] and len(trajectory_passes) == len(tool_cases),
         "available_tools": policy["tools"],
@@ -126,13 +129,26 @@ def function_calling_metrics(intent_eval: dict[str, Any], harness_eval: dict[str
         "tool_trajectory_accuracy": _rate(len(trajectory_passes), len(tool_cases)),
         "tool_result_event_rate": _rate(tool_result_events, tool_call_events),
         "search_expand_routes_to_tools": bool(search_expand and search_expand["passed"]),
+        # Manual §6.2 tool-decision metrics (thresholds in the test manual).
+        "tool_selection_precision": tool_decision["tool_selection_precision"],
+        "tool_selection_recall": tool_decision["tool_selection_recall"],
+        "ordering_accuracy": tool_decision["ordering_accuracy"],
+        "argument_validity": tool_decision["argument_validity"],
+        "redundant_call_rate": tool_decision["redundant_call_rate"],
+        "loop_exhaustion_rate": tool_decision["loop_exhaustion_rate"],
     }
 
 
 def rag_grounding_metrics(harness_eval: dict[str, Any]) -> dict[str, Any]:
     cases = harness_eval["cases"]
     evidence_required = [case for case in cases if case["evidence_count"] > 0 or "evidence" in case["events"]]
-    source_required = [case for case in cases if case["source_marker_present"] or case["evidence_count"] > 0]
+    # Task 4.x: capability-policy fail-closed abstentions (safety_replaced) are
+    # COMPLIANT outcomes, not grounding failures — excluded from source_required.
+    source_required = [
+        case for case in cases
+        if (case["source_marker_present"] or case["evidence_count"] > 0)
+        and not case.get("safety_replaced")
+    ]
     verdicts = Counter(case["quality_verdict"] for case in cases)
     grounded = verdicts.get("grounded", 0)
     partial = verdicts.get("partial", 0)
@@ -268,7 +284,9 @@ def data_source_summary() -> dict[str, Any]:
 def timeout_recovery_summary(project_id: int) -> dict[str, Any]:
     from agent.harness import ProjectAgentHarness
 
-    async def slow_executor(_name: str, _args: dict[str, Any]) -> dict[str, Any]:
+    async def slow_executor(
+        _context, _name: str, _args: dict[str, Any]
+    ) -> dict[str, Any]:
         await asyncio.sleep(0.05)
         return {"papers": [], "count": 0}
 

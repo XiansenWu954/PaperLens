@@ -83,8 +83,11 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
     chunk_count = serializers.SerializerMethodField()
     ingestion_status = serializers.SerializerMethodField()
     latest_ingestion_job_id = serializers.SerializerMethodField()
+    latest_ingestion_error = serializers.SerializerMethodField()
     embedding_model = serializers.SerializerMethodField()
     indexed_at = serializers.SerializerMethodField()
+    fulltext_ready = serializers.SerializerMethodField()
+    latest_job_retryable = serializers.SerializerMethodField()
 
     class Meta:
         model = ProjectPaper
@@ -106,9 +109,12 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
             "notes",
             "ingestion_status",
             "latest_ingestion_job_id",
+            "latest_ingestion_error",
             "embedding_model",
             "indexed_at",
             "chunk_count",
+            "fulltext_ready",
+            "latest_job_retryable",
             "created_at",
             "updated_at",
         ]
@@ -133,6 +139,12 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
         job = self._latest_job(obj)
         return job.id if job else None
 
+    def get_latest_ingestion_error(self, obj: ProjectPaper) -> str:
+        job = self._latest_job(obj)
+        if job and job.status == "failed" and job.error_message:
+            return job.error_message
+        return ""
+
     def get_embedding_model(self, obj: ProjectPaper) -> str:
         chunk = obj.paper.chunks.order_by("-indexed_at", "-id").first()
         return chunk.embedding_model if chunk else ""
@@ -146,6 +158,20 @@ class ProjectPaperSerializer(serializers.ModelSerializer):
             project=obj.project,
             paper=obj.paper,
         ).order_by("-created_at", "-id").first()
+
+    def get_fulltext_ready(self, obj: ProjectPaper) -> bool:
+        """Tasks 5.5: true ONLY when the paper has a live ACTIVE index version
+        WITH chunks — never from a URL or membership alone."""
+        from rag.models import PaperIndexVersion
+
+        return PaperIndexVersion.objects.filter(
+            paper=obj.paper, status="active",
+            chunk_count__gt=0,
+        ).exists()
+
+    def get_latest_job_retryable(self, obj: ProjectPaper) -> bool:
+        job = self._latest_job(obj)
+        return bool(job and job.status == "failed" and job.retryable)
 
 
 class ProjectRunEventSerializer(serializers.ModelSerializer):
@@ -201,6 +227,7 @@ class ReportVersionSerializer(serializers.ModelSerializer):
 
 class PaperIngestionJobSerializer(serializers.ModelSerializer):
     paper_title = serializers.CharField(source="paper.title", read_only=True)
+    fulltext_ready = serializers.SerializerMethodField()
 
     class Meta:
         model = PaperIngestionJob
@@ -210,13 +237,32 @@ class PaperIngestionJobSerializer(serializers.ModelSerializer):
             "paper",
             "paper_title",
             "status",
+            "source_kind",
             "file_name",
             "file_hash",
-            "source_url",
             "chunk_count",
+            "error_code",
             "error_message",
+            "retryable",
             "celery_task_id",
+            "fulltext_ready",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_fulltext_ready(self, obj) -> bool:
+        """Tasks 5.1 / Tasks5-CX-05: true ONLY when the paper has a live
+        ACTIVE index version WITH chunks (chunk_count > 0). building /
+        superseded / failed / active-with-zero-chunks are all false."""
+        if obj.index_version_id:
+            return (
+                obj.index_version.status == "active"
+                and obj.index_version.chunk_count > 0
+            )
+        from rag.models import PaperIndexVersion
+
+        return PaperIndexVersion.objects.filter(
+            paper_id=obj.paper_id, status="active",
+            chunk_count__gt=0,
+        ).exists()

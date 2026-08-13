@@ -1,0 +1,35 @@
+schema: spec-driven
+
+context: |
+  PaperLens is a Django 4.2 + DRF + Daphne backend and Vue 3 + TypeScript frontend
+  for project-scoped computer-science literature research.
+  Primary infrastructure is PostgreSQL + pgvector, Redis, Celery, BGE-M3 dense+sparse
+  retrieval, and DeepSeek as the only LLM provider. SQLite and fake embeddings are test
+  fallbacks only. The deterministic router and bounded ReAct Harness remain the stable chat
+  path; LangGraph is reserved for durable multi-step research workflows. MCP exports a small,
+  read-oriented project tool surface.
+  Authorization identity must come from server-created ToolExecutionContext. Project tools,
+  RAG, reports, citation graphs, and MCP must use ProjectScopeResolver and fail closed for
+  foreign, excluded, unlinked, empty, stale, or malformed evidence. Factual/compare/report
+  answers require database-resolved and answer-bound full-text evidence.
+  Never log or persist API keys, full prompts, paper bodies, evidence excerpts, or raw exception
+  messages. Use stable error codes, irreversible hashes, allowlisted event payloads, and
+  request/project/run/session/tool correlation IDs.
+  Keep public REST paths and required SSE event names compatible. Destructive project actions
+  are never autonomous Agent or MCP tools. Internal test reports remain under docs/internal and
+  are not public release material. Claims about quality or improvement require fixed artifacts,
+  reproducible commands, and honest PASS/FAIL results.
+
+rules:
+  proposal:
+    - "State the user problem, compatibility surface, non-goals, rollback boundary, and measurable release gate."
+    - "Explain why each Agent mechanism or framework is necessary; do not add Function Calling, MCP, LangGraph, or a new framework for display value alone."
+  specs:
+    - "Use MUST/SHALL requirements with explicit GIVEN/WHEN/THEN scenarios, including positive controls and fail-closed negative cases."
+    - "Define project scope, evidence level, authorization source, error shape, observability, and compatibility for every project-level capability."
+  design:
+    - "Reference established repository patterns before introducing abstractions and document trust boundaries, failure recovery, and sensitive-data handling."
+    - "Keep deterministic routing as the stable baseline and isolate optional model-driven or long-running workflows behind explicit contracts."
+  tasks:
+    - "Require tests before implementation for security or evidence regressions, followed by Docker PostgreSQL regression, frontend verification when affected, and machine-readable artifacts."
+    - "Finish with a four-part report: implemented, raw evidence, complete tests, and remaining work; never mark completion from stale reports or hardcoded verifier values."

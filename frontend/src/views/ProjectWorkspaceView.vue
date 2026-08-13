@@ -7,7 +7,7 @@ import EvidenceBoard from '../components/EvidenceBoard.vue'
 import ReportStudio from '../components/ReportStudio.vue'
 import RunInspector from '../components/RunInspector.vue'
 import { useProjectsStore } from '../stores/projects'
-import { getProjectCitationGraph, type GraphData, type ProjectPaper } from '../types'
+import { describeError, exportPapersUrl, getProjectCitationGraph, type GraphData, type ProjectPaper } from '../types'
 
 const route = useRoute()
 const store = useProjectsStore()
@@ -32,7 +32,7 @@ async function refreshAll() {
     await store.loadProject(projectId.value)
     await refreshGraph()
   } catch (error) {
-    pageError.value = error instanceof Error ? error.message : '加载项目失败'
+    pageError.value = describeError(error, '加载项目失败')
   }
 }
 
@@ -41,7 +41,7 @@ async function refreshGraph() {
   try {
     graph.value = await getProjectCitationGraph(projectId.value)
   } catch (error) {
-    pageError.value = error instanceof Error ? error.message : '加载引用图谱失败'
+    pageError.value = describeError(error, '加载引用图谱失败')
     graph.value = { nodes: [], edges: [] }
   } finally {
     graphBusy.value = false
@@ -57,10 +57,41 @@ async function searchAdd() {
     await refreshGraph()
     searchQuery.value = ''
   } catch (error) {
-    searchError.value = error instanceof Error ? error.message : '检索加入失败'
+    searchError.value = describeError(error, '检索加入失败')
   } finally {
     busy.value = false
   }
+}
+
+const importInput = ref<HTMLInputElement | null>(null)
+
+function triggerImport() {
+  importInput.value?.click()
+}
+
+async function handleImportFile(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  busy.value = true
+  searchError.value = ''
+  ingestionMessage.value = ''
+  try {
+    const text = await file.text()
+    const format = file.name.toLowerCase().endsWith('.ris') ? 'ris' : 'bibtex'
+    const result = await store.importPapers(projectId.value, text, format)
+    ingestionMessage.value = `已从 ${format} 导入 ${result.count} 篇论文。`
+    await refreshGraph()
+  } catch (error) {
+    searchError.value = describeError(error, '导入失败')
+  } finally {
+    busy.value = false
+    target.value = ''
+  }
+}
+
+function exportPapers(format: 'bib' | 'ris') {
+  window.open(exportPapersUrl(projectId.value, format), '_blank')
 }
 
 async function startWorkflow() {
@@ -74,7 +105,7 @@ async function startWorkflow() {
     ingestionMessage.value = '研究扩展工作流已启动：检索、入库、RAG、审阅和报告会写入运行日志。'
     active.value = 'runs'
   } catch (error) {
-    searchError.value = error instanceof Error ? error.message : '启动研究工作流失败'
+    searchError.value = describeError(error, '启动研究工作流失败')
   } finally {
     workflowBusy.value = false
   }
@@ -87,7 +118,7 @@ async function setPaperStatus(paperId: number, status: ProjectPaper['status']) {
     await store.loadProject(projectId.value)
     await refreshGraph()
   } catch (error) {
-    pageError.value = error instanceof Error ? error.message : '更新论文状态失败'
+    pageError.value = describeError(error, '更新论文状态失败')
   }
 }
 
@@ -98,7 +129,7 @@ async function removePaper(paperId: number) {
     await store.loadProject(projectId.value)
     await refreshGraph()
   } catch (error) {
-    pageError.value = error instanceof Error ? error.message : '移出论文失败'
+    pageError.value = describeError(error, '移出论文失败')
   }
 }
 
@@ -110,7 +141,7 @@ async function uploadPdf(paperId: number, file: File) {
     ingestionMessage.value = 'PDF 已进入入库队列，完成后会更新 RAG 状态。'
     await refreshGraph()
   } catch (error) {
-    pageError.value = error instanceof Error ? error.message : '上传 PDF 失败'
+    pageError.value = describeError(error, '上传 PDF 失败')
   }
 }
 
@@ -122,7 +153,21 @@ async function ingestPdf(paperId: number) {
     ingestionMessage.value = '已从论文链接创建入库任务。'
     await refreshGraph()
   } catch (error) {
-    pageError.value = error instanceof Error ? error.message : 'PDF 入库失败'
+    pageError.value = describeError(error, 'PDF 入库失败')
+  }
+}
+
+async function retryJob(paperId: number) {
+  // Tasks 5.5: retry the latest FAILED + retryable ingestion job (scoped)
+  pageError.value = ''
+  ingestionMessage.value = ''
+  try {
+    await store.retryIngestionJob(projectId.value, paperId)
+    ingestionMessage.value = '已重新排队入库任务。'
+    await store.loadProject(projectId.value)
+    await refreshGraph()
+  } catch (error) {
+    pageError.value = describeError(error, '重试入库失败')
   }
 }
 
@@ -159,6 +204,10 @@ async function saveReport(payload: { title: string; content: string; source?: st
       <button type="button" class="secondary-button" :disabled="workflowBusy || (!searchQuery.trim() && !store.currentProject?.title)" @click="startWorkflow">
         {{ workflowBusy ? '启动中' : '扩大检索并生成报告' }}
       </button>
+      <button type="button" class="secondary-button" :disabled="busy" @click="triggerImport">导入 BibTeX</button>
+      <button type="button" class="secondary-button" :disabled="!store.papers.length" @click="exportPapers('bib')">导出 .bib</button>
+      <button type="button" class="secondary-button" :disabled="!store.papers.length" @click="exportPapers('ris')">导出 .ris</button>
+      <input ref="importInput" type="file" accept=".bib,.ris,.txt" hidden @change="handleImportFile" />
       <p v-if="searchError" class="search-error">{{ searchError }}</p>
     </form>
 
@@ -179,6 +228,7 @@ async function saveReport(payload: { title: string; content: string; source?: st
           @remove="removePaper"
           @upload-pdf="uploadPdf"
           @ingest-pdf="ingestPdf"
+          @retry-job="retryJob"
         />
 
         <section v-if="active === 'graph'" class="shell-panel graph-card">
@@ -311,7 +361,7 @@ input {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 1fr);
   gap: 14px;
   align-items: start;
 }

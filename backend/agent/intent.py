@@ -130,6 +130,36 @@ DESTRUCTIVE_TOKENS = (
     "overwrite",
 )
 
+# Task 4.x: structured compare intent — per-paper fulltext evidence required.
+COMPARE_TOKENS = (
+    "对比",
+    "比较",
+    "相比",
+    "versus",
+    "compare",
+)
+
+# Task 4.x: structured export intent — action capability (no fulltext needed).
+EXPORT_TOKENS = (
+    "导出",
+    "bibtex",
+    "bib 文件",
+    "export",
+)
+
+# §25.2: greetings / ambiguous requests without a concrete project task.
+CLARIFY_TOKENS = (
+    "你好",
+    "您好",
+    "嗨",
+    "hello",
+    "thanks",
+    "thank you",
+    "谢谢",
+    "感谢",
+    "在吗",
+)
+
 
 @dataclass(frozen=True)
 class ToolPlanStep:
@@ -156,7 +186,8 @@ def classify_project_intent(message: str, project_id: int) -> ProjectIntent:
     text = (message or "").strip()
     lowered = text.lower()
     if not text:
-        return ProjectIntent("empty", "empty message", tuple(), blocked=True)
+        # §25.2: an empty message is a CLARIFY request, not a blocked one.
+        return ProjectIntent("empty", "empty message", tuple())
 
     if _has_any(lowered, DESTRUCTIVE_TOKENS):
         return ProjectIntent(
@@ -164,6 +195,34 @@ def classify_project_intent(message: str, project_id: int) -> ProjectIntent:
             "destructive project changes require explicit UI/API action",
             tuple(),
             blocked=True,
+        )
+
+    # Task 4.x: compare is a distinct structured capability (per-paper fulltext).
+    if _has_any(lowered, COMPARE_TOKENS):
+        return ProjectIntent(
+            "compare",
+            "comparing papers requires per-paper full-text evidence",
+            (ToolPlanStep(
+                "compare_papers",
+                {"paper_ids": [], "question": text},
+                "compare project papers by full-text evidence",
+            ),),
+        )
+
+    # §25.2: ambiguous greetings need clarification — no tools, no evidence.
+    if _has_any(lowered, CLARIFY_TOKENS):
+        return ProjectIntent(
+            "clarify",
+            "greeting or ambiguous request needs clarification",
+            tuple(),
+        )
+
+    # Task 4.x: export is a structured action capability (no fulltext needed).
+    if _has_any(lowered, EXPORT_TOKENS):
+        return ProjectIntent(
+            "export",
+            "exporting the project library is a structured action",
+            (ToolPlanStep("export_bibtex", {}, "export project library as BibTeX"),),
         )
 
     wants_search = _wants_search(lowered)
@@ -250,7 +309,10 @@ def classify_project_intent(message: str, project_id: int) -> ProjectIntent:
                 )
             )
 
-    intent_name = _name_intent(wants_search, wants_list, wants_graph, wants_report, wants_search_direction)
+    intent_name = _name_intent(
+        wants_search, wants_list, wants_graph, wants_report,
+        wants_search_direction, wants_library_reasoning,
+    )
     return ProjectIntent(intent_name, _rationale(intent_name), tuple(plan))
 
 
@@ -310,14 +372,18 @@ def _clean_search_query(text: str) -> str:
     return cleaned or text[:160]
 
 
-def _name_intent(search: bool, list_: bool, graph: bool, report: bool, search_direction: bool = False) -> str:
+def _name_intent(search: bool, list_: bool, graph: bool, report: bool,
+                 search_direction: bool = False,
+                 library_reasoning: bool = False) -> str:
     names = []
     if search:
         names.append("search_add")
     if search_direction:
         names.append("search_direction")
     if list_:
-        names.append("library")
+        # §24.1: pure inventory stays `library` (ACTION); inventory WITH
+        # reasoning (core/recommendation/why) is `library_reasoning` (FACTUAL).
+        names.append("library_reasoning" if library_reasoning else "library")
     if graph:
         names.append("graph")
     if report:

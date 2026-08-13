@@ -12,6 +12,7 @@ export interface GraphNode {
   size: number
   color_year: number | null
   cluster: number
+  cluster_label?: string
   is_root: boolean
   is_frontier: boolean
   seminal: number
@@ -66,6 +67,10 @@ export interface ResearchProject {
   updated_at: string
 }
 
+export type IngestionStatus =
+  | 'pending' | 'downloading' | 'parsing' | 'embedding'
+  | 'committing' | 'embedded' | 'failed'
+
 export interface ProjectPaper {
   id: number
   paper_id: number
@@ -80,13 +85,16 @@ export interface ProjectPaper {
   pdf_url: string | null
   status: 'candidate' | 'included' | 'core' | 'excluded'
   source_reason: string
-  added_by: 'user' | 'agent' | 'demo'
+  added_by: string
   notes: string
-  ingestion_status: 'pending' | 'parsing' | 'embedded' | 'failed'
+  ingestion_status: IngestionStatus
   latest_ingestion_job_id: number | null
+  latest_ingestion_error: string
   embedding_model: string
   indexed_at: string | null
   chunk_count: number
+  fulltext_ready: boolean
+  latest_job_retryable: boolean
   created_at: string
   updated_at: string
 }
@@ -97,11 +105,14 @@ export interface PaperIngestionJob {
   paper: number
   paper_title: string
   status: 'pending' | 'parsing' | 'embedded' | 'failed'
+  source_kind: string
   file_name: string
   file_hash: string
-  source_url: string
   chunk_count: number
+  error_code: string
   error_message: string
+  retryable: boolean
+  fulltext_ready: boolean
   celery_task_id: string
   created_at: string
   updated_at: string
@@ -172,6 +183,37 @@ export class ApiError extends Error {
     this.requestId = requestId
     this.detail = detail
   }
+}
+
+/**
+ * 把任意错误转成对用户友好的中文文案，并附带 requestId（如有）便于排查。
+ * 各视图的 catch 块应统一使用此函数，避免直接展示原始英文堆栈/裸状态码。
+ */
+export function describeError(error: unknown, fallback = '操作失败，请稍后重试'): string {
+  if (error instanceof ApiError) {
+    let hint: string
+    if (error.status === 0 || error.message.includes('Failed to fetch')) {
+      hint = '无法连接服务器，请确认后端服务正在运行'
+    } else if (error.status === 401 || error.status === 403) {
+      hint = '请求未授权'
+    } else if (error.status === 404) {
+      hint = '请求的资源不存在'
+    } else if (error.status === 429) {
+      hint = '请求过于频繁，请稍后再试'
+    } else if (error.status >= 500) {
+      hint = '服务器内部错误'
+    } else {
+      hint = error.detail || error.message || fallback
+    }
+    return error.requestId ? `${hint}（编号 ${error.requestId}）` : hint
+  }
+  if (error instanceof Error) {
+    if (error.message.includes('Failed to fetch') || error.name === 'TypeError') {
+      return '无法连接服务器，请确认后端服务正在运行'
+    }
+    return error.message || fallback
+  }
+  return fallback
 }
 
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
@@ -273,6 +315,43 @@ export async function removeProjectPaper(projectId: number, paperId: number): Pr
   await parseResponse(response, `移除论文失败: ${response.status}`)
 }
 
+export interface ImportResult {
+  format: string
+  count: number
+  added: { paper_id: number; title: string; created: boolean }[]
+}
+
+export async function importProjectPapers(
+  projectId: number,
+  text: string,
+  format: 'bibtex' | 'ris',
+): Promise<ImportResult> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/papers/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, format }),
+  })
+  return parseResponse(response, `导入失败: ${response.status}`)
+}
+
+export function exportPapersUrl(projectId: number, format: 'bib' | 'ris'): string {
+  return `${API_BASE}/api/projects/${projectId}/papers/export.${format}`
+}
+
+export interface ConnectionPath {
+  path: number[]
+  reachable: boolean
+  hops?: number
+  nodes?: { id: number; title: string; year: number | null; citation_count: number }[]
+  edges?: { source: number; target: number; weight: number }[]
+  reason?: string
+}
+
+export async function getConnectionPath(projectId: number, paperAId: number, paperBId: number): Promise<ConnectionPath> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/papers/${paperAId}/path/${paperBId}`)
+  return parseResponse(response, `查询连接路径失败: ${response.status}`)
+}
+
 export async function uploadProjectPaperPdf(projectId: number, paperId: number, file: File): Promise<PaperIngestionJob> {
   const body = new FormData()
   body.append('file', file)
@@ -295,6 +374,13 @@ export async function ingestProjectPaperPdf(projectId: number, paperId: number, 
 export async function listProjectIngestionJobs(projectId: number): Promise<PaperIngestionJob[]> {
   const response = await fetch(`${API_BASE}/api/projects/${projectId}/ingestion-jobs`)
   return parseResponse(response, `查询入库任务失败: ${response.status}`)
+}
+
+export async function retryProjectIngestionJob(projectId: number, jobId: number): Promise<PaperIngestionJob> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ingestion-jobs/${jobId}/retry`, {
+    method: 'POST',
+  })
+  return parseResponse(response, `重试入库任务失败: ${response.status}`)
 }
 
 export async function listReports(projectId: number): Promise<ReportVersion[]> {

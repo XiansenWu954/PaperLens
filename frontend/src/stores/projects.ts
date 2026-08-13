@@ -1,11 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { PaperIngestionJob, ProjectPaper, ProjectRun, ReportVersion, ResearchProject } from '../types'
+import type { ImportResult } from '../types'
 import {
   createProject,
+  describeError,
   getProject,
+  importProjectPapers,
   ingestProjectPaperPdf,
-  listProjectIngestionJobs,
+  listProjectIngestionJobs, retryProjectIngestionJob,
   listProjectPapers,
   listProjects,
   listProjectRuns,
@@ -35,7 +38,7 @@ export const useProjectsStore = defineStore('projects', () => {
     try {
       projects.value = await listProjects()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载项目失败'
+      error.value = describeError(e, '加载项目失败')
     } finally {
       loading.value = false
     }
@@ -69,7 +72,7 @@ export const useProjectsStore = defineStore('projects', () => {
       ingestionJobs.value = jobs
       runs.value = await listProjectRuns(projectId)
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载项目失败'
+      error.value = describeError(e, '加载项目失败')
       throw e
     } finally {
       loading.value = false
@@ -81,6 +84,13 @@ export const useProjectsStore = defineStore('projects', () => {
     papers.value = await listProjectPapers(projectId)
     currentProject.value = await getProject(projectId)
     runs.value = await listProjectRuns(projectId)
+    return result
+  }
+
+  async function importPapers(projectId: number, text: string, format: 'bibtex' | 'ris'): Promise<ImportResult> {
+    const result = await importProjectPapers(projectId, text, format)
+    papers.value = await listProjectPapers(projectId)
+    currentProject.value = await getProject(projectId)
     return result
   }
 
@@ -113,6 +123,18 @@ export const useProjectsStore = defineStore('projects', () => {
     const job = await ingestProjectPaperPdf(projectId, paperId, pdfUrl)
     await refreshProjectArtifacts(projectId)
     return job
+  }
+
+  async function retryIngestionJob(projectId: number, paperId: number) {
+    // Tasks 5.5: retry the latest FAILED + retryable job of this paper
+    const jobs = await listProjectIngestionJobs(projectId)
+    const latest = jobs
+      .filter((j) => j.paper === paperId && j.status === 'failed' && j.retryable)
+      .sort((a, b) => b.id - a.id)[0]
+    if (!latest) throw new Error('没有可重试的入库任务')
+    await retryProjectIngestionJob(projectId, latest.id)
+    await refreshProjectArtifacts(projectId)
+    return latest
   }
 
   async function saveReport(projectId: number, payload: { title: string; content: string; source?: string }) {
@@ -159,12 +181,14 @@ export const useProjectsStore = defineStore('projects', () => {
     seedDemo,
     loadProject,
     searchAdd,
+    importPapers,
     setPaperStatus,
     removePaper,
     loadRuns,
     loadIngestionJobs,
     uploadPdf,
     ingestFromPdfUrl,
+    retryIngestionJob,
     saveReport,
     startWorkflow,
     refreshProjectArtifacts,

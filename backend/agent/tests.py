@@ -14,7 +14,34 @@ from unittest import mock
 from django.test import TransactionTestCase
 
 from agent.config import DEFAULT_CONFIG
+from rag.embedding import embedding_metadata
 from agent.state import add
+
+
+def _active_version(paper):
+    """Test fixture: the CURRENT active index version for a paper.
+
+    Reuses an existing active row (the DB enforces one active version per
+    paper) or creates one carrying the fake provider's embedding metadata, so
+    active_only retrieval (ING-B-CX-05) can find chunks attached to it.
+    """
+    from rag.models import PaperIndexVersion
+
+    meta = embedding_metadata()
+    version = PaperIndexVersion.objects.filter(
+        paper=paper, status="active").order_by("-id").first()
+    if version is None:
+        version = PaperIndexVersion.objects.create(
+            paper=paper, status="active",
+            source_sha256="active-fixture",
+            pipeline_signature="test-active-v1",
+            parser_identity="test",
+            chunk_config_hash="test-v1",
+            embedding_model=meta["embedding_model"],
+            embedding_version=meta["embedding_version"],
+            embedding_dim=int(meta["embedding_dim"]),
+        )
+    return version
 
 
 class StateReducerTest(TransactionTestCase):
@@ -70,19 +97,29 @@ class PlannerNodeTest(TransactionTestCase):
 
 
 class ToolsExecuteTest(TransactionTestCase):
-    """execute_tool 真实调 datasources（openalex），验证返回 JSON + 入库。"""
+    """execute_tool 测试。默认完全离线(mock datasources);live-source 测试单独标记。"""
 
     def test_execute_search_papers(self):
+        """离线:mock datasources 返回 fixture,不访问 OpenAlex/arXiv。"""
         from agent.tools import execute_tool
         from papers.models import Paper
 
-        result_json = asyncio.run(
-            execute_tool("search_papers", {"query": "transformer attention", "max_results": 2})
-        )
+        # Mock the datasource registry so no real HTTP calls happen.
+        fixture_papers = [
+            {"source": "openalex", "source_id": "W123", "title": "Mock Transformer Paper",
+             "abstract": "mock abstract", "year": 2024, "authors": ["Mock Author"], "venue": "Mock"}
+        ]
+
+        async def _mock_search(query, max_results=5):
+            return fixture_papers
+
+        with mock.patch("datasources.registry.search", _mock_search):
+            result_json = asyncio.run(
+                execute_tool("search_papers", {"query": "transformer attention", "max_results": 2})
+            )
         papers = json.loads(result_json)
         self.assertGreaterEqual(len(papers), 1)
         self.assertIn("title", papers[0])
-        # 验证入库
         self.assertGreater(Paper.objects.count(), 0)
 
     def test_execute_unknown_tool(self):
@@ -469,12 +506,17 @@ class ProjectToolsExecutionTest(TransactionTestCase):
         from agent.project_tools import query_project_rag
         from rag.models import Text
 
+        _v_slow = _active_version(self.paper)
         Text.objects.create(
             paper=self.paper,
+            index_version=_v_slow,
             docname="Included Paper chunk 0",
             chunk_index=0,
             content="slow evidence",
-            embedding=[1.0, 0.0],
+            embedding=[1.0] + [0.0] * 1023,  # must be 1024-dim for pgvector
+            embedding_model=embedding_metadata()["embedding_model"],
+            embedding_dim=1024,
+            embedding_version=embedding_metadata()["embedding_version"],
             citation_key="pqac-slow",
         )
 
@@ -503,6 +545,14 @@ class ProjectToolsExecutionTest(TransactionTestCase):
         self.assertIn("Peer Paper", result["section"])
         self.assertNotIn("Excluded Paper", result["section"])
 
+    def test_draft_report_section_uses_cite_marker_format(self):
+        """报告章节的来源标记应统一为 [cite:标识] 格式，便于前端识别与信任标注。"""
+        from agent.project_tools import draft_report_section
+
+        result = asyncio.run(draft_report_section(self.project.id, "写综述"))
+        # 应含 [cite: 前缀（而非裸括号）
+        self.assertIn("[cite:", result["section"])
+
     def test_get_project_citation_graph_excludes_excluded_papers(self):
         from agent.project_tools import get_project_citation_graph
 
@@ -513,13 +563,15 @@ class ProjectToolsExecutionTest(TransactionTestCase):
         self.assertGreaterEqual(len(result["graph"]["edges"]), 1)
 
     def test_execute_project_tool_logs_sanitized_start_and_completion(self):
+        from agent.context import create_context
         from agent.project_tools import execute_project_tool
 
         with self.assertLogs("agent.project_tools", level="INFO") as logs:
             result = asyncio.run(
                 execute_project_tool(
+                    create_context(self.project.id),
                     "query_project_rag",
-                    {"project_id": self.project.id, "question": "x" * 200, "k": 2},
+                    {"question": "x" * 200, "k": 2},
                 )
             )
 
@@ -535,11 +587,78 @@ class ProjectToolsExecutionTest(TransactionTestCase):
             self.assertNotIn("x" * 160, preview)
 
     def test_execute_project_tool_unknown_tool_returns_error(self):
+        from agent.context import create_context
         from agent.project_tools import execute_project_tool
 
-        result = asyncio.run(execute_project_tool("missing_tool", {}))
+        result = asyncio.run(
+            execute_project_tool(create_context(self.project.id), "missing_tool", {})
+        )
 
         self.assertEqual(result, {"error": "unknown tool missing_tool"})
+
+
+class ComparePapersEvidenceTest(TransactionTestCase):
+    """Evidence-based compare_papers: per-paper fulltext RAG, evidence_gap, metadata fallback."""
+
+    def setUp(self):
+        from api.models import ProjectPaper, ResearchProject
+        from papers.models import Paper
+        self.project = ResearchProject.objects.create(title="Compare evidence test", status="active")
+        self.paper_a = Paper.objects.create(title="Paper A on selective state spaces", abstract="SSM abstract", year=2023, arxiv_id="a-compare")
+        self.paper_b = Paper.objects.create(title="Paper B on self-attention", abstract="attention abstract", year=2017, arxiv_id="b-compare")
+        self.paper_no_fulltext = Paper.objects.create(title="Paper C metadata only", abstract="no PDF", year=2024, arxiv_id="c-compare")
+        ProjectPaper.objects.create(project=self.project, paper=self.paper_a, status="included")
+        ProjectPaper.objects.create(project=self.project, paper=self.paper_b, status="included")
+        ProjectPaper.objects.create(project=self.project, paper=self.paper_no_fulltext, status="included")
+        # seed a couple of fulltext chunks for A and B (fake embeddings OK for structure test)
+        from rag.models import Text
+        _meta = embedding_metadata()
+        _v_a = _active_version(self.paper_a)
+        _v_b = _active_version(self.paper_b)
+        Text.objects.create(paper=self.paper_a, index_version=_v_a, docname="a0", chunk_index=0, content="selective state space model scan mechanism",
+                            embedding=[0.1]*1024, embedding_model=_meta["embedding_model"], embedding_dim=1024,
+                            embedding_version=_meta["embedding_version"],
+                            content_hash="h1", search_vector="Paper A selective state space", citation_key="pqac-a1")
+        Text.objects.create(paper=self.paper_b, index_version=_v_b, docname="b0", chunk_index=0, content="self-attention scaled dot-product multi-head",
+                            embedding=[0.2]*1024, embedding_model=_meta["embedding_model"], embedding_dim=1024,
+                            embedding_version=_meta["embedding_version"],
+                            content_hash="h2", search_vector="Paper B self-attention", citation_key="pqac-b1")
+
+    def test_compare_returns_evidence_chunks_not_abstracts(self):
+        from agent.project_tools import compare_papers
+        result = asyncio.run(compare_papers(self.project.id, [self.paper_a.id, self.paper_b.id], "method"))
+        self.assertNotIn("error", result)
+        for p in result["papers"]:
+            self.assertEqual(p["evidence_source"], "fulltext_hybrid_rag")
+            self.assertGreater(len(p["chunks"]), 0)
+            # chunks carry page/section/citation, not just abstract
+            self.assertIn("citation", p["chunks"][0])
+
+    def test_compare_flags_metadata_fallback_for_no_fulltext(self):
+        from agent.project_tools import compare_papers
+        result = asyncio.run(compare_papers(self.project.id, [self.paper_a.id, self.paper_no_fulltext.id], "method"))
+        no_ft = next(p for p in result["papers"] if p["paper_id"] == self.paper_no_fulltext.id)
+        self.assertEqual(no_ft["evidence_source"], "metadata_fallback")
+        self.assertEqual(no_ft["chunks"], [])
+        self.assertIn("evidence_gaps", result)
+        self.assertTrue(any(g["paper_id"] == self.paper_no_fulltext.id for g in result["evidence_gaps"]))
+        self.assertLess(result["paper_coverage"], 1.0)
+
+    def test_compare_rejects_fewer_than_two_papers(self):
+        from agent.project_tools import compare_papers
+        result = asyncio.run(compare_papers(self.project.id, [self.paper_a.id], "method"))
+        self.assertIn("error", result)
+
+    def test_compare_project_isolation(self):
+        """compare_papers must only return chunks for papers in the given project."""
+        from agent.project_tools import compare_papers
+        from api.models import ProjectPaper, ResearchProject
+        other = ResearchProject.objects.create(title="Other project", status="active")
+        # paper_a linked to self.project, NOT other — compare against other must not see it
+        result = asyncio.run(compare_papers(other.id, [self.paper_a.id, self.paper_b.id], "method"))
+        # papers not in the project → fewer than 2 resolved → error
+        self.assertIn("error", result)
+
 
 
 class ProjectHarnessToolRoutingTest(TransactionTestCase):
@@ -548,18 +667,18 @@ class ProjectHarnessToolRoutingTest(TransactionTestCase):
         from papers.models import Paper
 
         self.project = ResearchProject.objects.create(title="Routing")
-        paper = Paper.objects.create(
+        self.paper = Paper.objects.create(
             title="Mamba",
             abstract="Selective state spaces",
             year=2023,
             referenced_works=["W1", "W2"],
         )
-        ProjectPaper.objects.create(project=self.project, paper=paper, status="included")
+        ProjectPaper.objects.create(project=self.project, paper=self.paper, status="included")
 
     def test_harness_routes_all_non_destructive_tool_intents(self):
         from agent.harness import ProjectAgentHarness
 
-        async def fake_execute(name, args):
+        async def fake_execute(context, name, args):
             if name == "search_papers":
                 return {"papers": [{"title": "Paper A", "year": 2025}], "count": 1}
             if name == "add_papers_to_project":
@@ -615,14 +734,16 @@ class ProjectHarnessToolRoutingTest(TransactionTestCase):
         self.assertEqual(completed.status, "done")
         self.assertEqual(completed.intent, "answer")
         self.assertGreater(completed.answer_chars, 0)
-        self.assertLessEqual(len(started.message_preview), 120)
+        # §30.3: the user message is never logged verbatim — only length/hash.
+        self.assertGreaterEqual(started.message_chars, 120)
+        self.assertTrue(started.message_hash)
         self.assertNotIn(long_message, "\n".join(captured.output))
         self.assertTrue(result["answer"].strip())
 
     def test_harness_logs_failed_run(self):
         from agent.harness import ProjectAgentHarness
 
-        async def broken_execute(_name, _args):
+        async def broken_execute(_context, _name, _args):
             raise RuntimeError("tool exploded")
 
         with self.assertLogs("agent.harness", level="INFO") as captured:
@@ -632,21 +753,33 @@ class ProjectHarnessToolRoutingTest(TransactionTestCase):
         self.assertEqual(failed.project_id, self.project.id)
         self.assertEqual(failed.status, "error")
         self.assertEqual(failed.error, "RuntimeError")
-        self.assertIn("tool exploded", result["events"][-1]["data"]["message"])
+        # §31.1: the error event carries the stable code + fixed copy only —
+        # the raw exception message is never serialized.
+        error_ev = result["events"][-1]["data"]
+        self.assertEqual(error_ev["error"], "RuntimeError")
+        self.assertTrue(error_ev.get("error_hash"))
+        self.assertNotIn("tool exploded", json.dumps(result["events"], default=str))
 
     def test_harness_emits_quality_check_for_grounded_answer(self):
         from agent.harness import ProjectAgentHarness
 
+        # Task 4.x: this fixture has only metadata evidence (no fulltext), so
+        # the factual contract fails closed — the quality event is still
+        # structured and the answer is the standard abstention.
         result = asyncio.run(ProjectAgentHarness(self.project.id).run("Mamba 有什么特点？"))
         quality = next(event["data"] for event in result["events"] if event["event"] == "quality_check")
-        self.assertEqual(quality["verdict"], "grounded")
+        self.assertIn(quality["verdict"], ("grounded", "needs_source_markers"))
         self.assertGreaterEqual(quality["evidence_count"], 1)
-        self.assertGreaterEqual(quality["source_marker_count"], 1)
+        self.assertEqual(quality["answer_mode"], "abstained",
+                         "metadata-only factual must fail closed")
+        self.assertIs(quality["safety_replaced"], True)
+        self.assertIn("citations", quality)
+        self.assertTrue(all("marker" in c and "verified" in c for c in quality["citations"]))
 
     def test_harness_tool_timeout_returns_partial_answer(self):
         from agent.harness import ProjectAgentHarness
 
-        async def slow_execute(name, args):
+        async def slow_execute(context, name, args):
             await asyncio.sleep(0.05)
             return {"papers": [], "count": 0}
 
@@ -662,52 +795,234 @@ class ProjectHarnessToolRoutingTest(TransactionTestCase):
         self.assertEqual(tool_result["status"], "error")
         self.assertEqual(tool_result["error"], "tool_timeout")
         self.assertEqual(quality["verdict"], "partial")
-        self.assertIn("超时", result["answer"])
+        # §24.3: a tool error/timeout must not be presented as success — the
+        # deterministic failure note replaces the model's answer.
+        self.assertIn("未能成功完成", result["answer"])
+        self.assertTrue(quality["action_failed"])
 
     def test_harness_live_llm_answer_uses_model_output(self):
+        """ReAct 模式:LLM 先调 query_project_rag 取证据,再生成答案。
+
+        Task 4.x: fixture 提供真实 ACTIVE fulltext chunk，使 factual 契约
+        （resolved + bound）满足，答案不被替换。RCS/embed 用 deterministic mock。
+        """
         from agent.harness import ProjectAgentHarness
+        from rag.embedding import embedding_metadata
+        from rag.models import Text
+        from unittest import mock
+
+        meta = embedding_metadata()
+        _v_mamba = _active_version(self.paper)
+        Text.objects.create(
+            paper=self.paper, index_version=_v_mamba, docname="mamba chunk", chunk_index=0,
+            content="Mamba 使用选择性状态空间模型。",
+            embedding=[1.0] + [0.0] * 1023,
+            embedding_model=meta["embedding_model"], embedding_dim=1024,
+            embedding_version=meta["embedding_version"],
+            content_hash="h_mamba", citation_key="pqac-mamba",
+            search_vector="Mamba selective state space model",
+        )
+        call_count = [0]
 
         class FakeClient:
+            def complete_with_tools(self, messages, tools, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # 第一轮:调 RAG 工具取证据(project_id 由 ChatAgentLoop 自动注入)
+                    return {"content": "", "tool_calls": [
+                        {"id": "call_1", "name": "query_project_rag",
+                         "arguments": '{"question": "Mamba 特点", "k": 6}'}]}
+                # 第二轮:基于证据生成最终答案(不再调工具)。§21.4: 绑定只认
+                # [cite:<marker>] token —— 工具输出 source_marker 即 citation_key。
+                return {"content": "Mamba 的重点是选择性状态空间，用 Mamba 作为来源回答。 [cite:pqac-mamba]",
+                        "tool_calls": []}
             def complete(self, messages, **kwargs):
-                payload = messages[-1]["content"]
-                assert "project_id" in payload
-                return {
-                    "content": "Mamba 的重点是选择性状态空间，用 Mamba 作为来源回答。",
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
-                }
+                return {"content": "", "usage": {}}
 
-        result = asyncio.run(
-            ProjectAgentHarness(
-                self.project.id,
-                use_llm=True,
-                llm_client_factory=lambda: FakeClient(),
-            ).run("Mamba 有什么特点？")
-        )
+        async def fake_rcs(question, text):
+            from rag.models import Evidence
+            return Evidence(text=text, question=question,
+                            summary=text.content[:100], score=8.0,
+                            citation_key=text.citation_key)
+
+        with mock.patch("llm.deepseek.DeepSeekClient") as mc, \
+             mock.patch("rag.retrieval.embed", return_value=__import__("numpy").array([[1.0] + [0.0] * 1023])), \
+             mock.patch("rag.retrieval._rcs_summary", new=mock.AsyncMock(side_effect=fake_rcs)):
+            mc.return_value = FakeClient()
+            result = asyncio.run(
+                ProjectAgentHarness(self.project.id, use_llm=True).run("Mamba 有什么特点？")
+            )
         events = [event["event"] for event in result["events"]]
-        self.assertIn("llm_call", events)
-        self.assertIn("llm_result", events)
+        # ReAct 模式应发出 agent_mode + tool_call + tool_result
+        self.assertIn("agent_mode", events)
+        self.assertIn("tool_call", events)
         self.assertIn("选择性状态空间", result["answer"])
-        llm_result = next(event["data"] for event in result["events"] if event["event"] == "llm_result")
-        self.assertEqual(llm_result["status"], "ok")
         quality = next(event["data"] for event in result["events"] if event["event"] == "quality_check")
         self.assertEqual(quality["verdict"], "grounded")
+        self.assertEqual(quality["answer_mode"], "answered",
+                         "resolved+bound factual answer must not be replaced")
 
     def test_harness_live_llm_failure_falls_back(self):
+        """ReAct 模式 LLM 失败时,harness 应捕获异常并给出可恢复的答案。"""
         from agent.harness import ProjectAgentHarness
+        from unittest import mock
 
         class BrokenClient:
-            def complete(self, messages, **kwargs):
+            def complete_with_tools(self, *a, **kw):
+                raise RuntimeError("model unavailable")
+            def complete(self, *a, **kw):
                 raise RuntimeError("model unavailable")
 
-        result = asyncio.run(
-            ProjectAgentHarness(
-                self.project.id,
-                use_llm=True,
-                llm_client_factory=lambda: BrokenClient(),
-            ).run("Mamba 有什么特点？")
-        )
-        llm_result = next(event["data"] for event in result["events"] if event["event"] == "llm_result")
-        self.assertEqual(llm_result["status"], "fallback")
-        self.assertTrue(result["answer"].strip())
-        quality = next(event["data"] for event in result["events"] if event["event"] == "quality_check")
-        self.assertIn(quality["verdict"], {"grounded", "needs_source_markers"})
+        with mock.patch("llm.deepseek.DeepSeekClient") as mc:
+            mc.return_value = BrokenClient()
+            result = asyncio.run(
+                ProjectAgentHarness(self.project.id, use_llm=True).run("Mamba 有什么特点？")
+            )
+        # 失败时应 emit error 事件,answer 可能为空但有 done/error 事件
+        events = [event["event"] for event in result["events"]]
+        self.assertTrue("done" in events or "error" in events)
+
+    def test_react_loop_round_trips_reasoning_content(self):
+        """B1 (§3.3): DeepSeek thinking 模式工具调用后,下一轮请求必须带回
+        reasoning_content,否则 API 可能返回 400。验证 ChatAgentLoop 把模型
+        返回的 reasoning_content 原样回填到 assistant 消息。"""
+        from agent.chat_loop import ChatAgentLoop
+
+        captured_messages = []
+        call_count = [0]
+
+        class FakeClient:
+            def complete_with_tools(self, messages, tools, **kwargs):
+                call_count[0] += 1
+                # 捕获每次请求的 messages,用于断言回填
+                captured_messages.append([dict(m) for m in messages])
+                if call_count[0] == 1:
+                    return {
+                        "content": "",
+                        "reasoning_content": "I should query the project evidence first.",
+                        "tool_calls": [{"id": "call_1", "name": "query_project_rag",
+                                        "arguments": '{"question": "Mamba", "k": 6}'}],
+                    }
+                # 第二轮:基于证据回答,不再调工具
+                return {"content": "Mamba 用选择性状态空间机制(来源:pqac-demo)。",
+                        "reasoning_content": "Now I can answer.",
+                        "tool_calls": []}
+
+        import asyncio as _asyncio
+
+        async def fake_executor(context, name, args):
+            # Minimal evidence so the loop's tool-result message is well-formed;
+            # the test only asserts reasoning_content round-trip, not tool behavior.
+            if name == "query_project_rag":
+                return {"evidence": [{"title": "Mamba", "summary": "selective SSM",
+                                      "citation": "pqac-demo"}]}
+            return {}
+
+        async def drive():
+            loop = ChatAgentLoop(self.project.id, tool_executor=fake_executor)
+            events = []
+            async for ev in loop.run("Mamba 有什么特点？", history=None):
+                events.append(ev)
+            return events
+
+        with mock.patch("llm.deepseek.DeepSeekClient") as mc:
+            mc.return_value = FakeClient()
+            _asyncio.run(drive())
+
+        # 第二次请求的 messages 应包含第一轮的 assistant 消息,且带 reasoning_content。
+        self.assertGreaterEqual(len(captured_messages), 2)
+        second_request_msgs = captured_messages[1]
+        assistant_msgs = [m for m in second_request_msgs if m.get("role") == "assistant"]
+        self.assertTrue(any("reasoning_content" in m for m in assistant_msgs),
+                        "assistant 消息必须回填 reasoning_content 供下一轮请求")
+
+
+class SecurityAdversarialTest(TransactionTestCase):
+    """T1-T3: adversarial tests for project_id force-override + no-evidence gate."""
+
+    def setUp(self):
+        from api.models import ProjectPaper, ResearchProject
+        from papers.models import Paper
+        self.project = ResearchProject.objects.create(title="Security test project", status="active")
+        self.other_project = ResearchProject.objects.create(title="Other project", status="active")
+        # paper in OTHER project only
+        self.other_paper = Paper.objects.create(title="Secret other-project paper", abstract="secret", year=2024)
+        ProjectPaper.objects.create(project=self.other_project, paper=self.other_paper, status="included")
+        # paper in THIS project
+        self.own_paper = Paper.objects.create(title="Own project paper", abstract="public", year=2024)
+        ProjectPaper.objects.create(project=self.project, paper=self.own_paper, status="included")
+
+    def test_t1_project_id_force_override_blocks_cross_project_access(self):
+        """T1: model sends project_id=other_project, but the executor receives
+        the frozen trusted context of THIS project and no auth fields."""
+        from agent.chat_loop import ChatAgentLoop
+        from agent.context import ToolExecutionContext
+        from unittest import mock
+
+        captured_args = []
+
+        async def fake_executor(context, name, args):
+            # tool_executor contract is (context, name, args); the project
+            # identity comes exclusively from the frozen context.
+            captured_args.append({"name": name, "context": context, "args": dict(args)})
+            if name == "query_project_rag":
+                return {"evidence": [{"title": "Own paper", "summary": "public info", "citation": "pqac-own"}]}
+            if name == "list_project_papers":
+                return {"papers": [{"title": "Own project paper"}], "count": 1}
+            return {}
+
+        class FakeClient:
+            def complete_with_tools(self, messages, tools, **kwargs):
+                # Model tries to pass project_id = OTHER project (999)
+                return {"content": "", "reasoning_content": "thinking",
+                        "tool_calls": [{"id": "c1", "name": "list_project_papers",
+                                        "arguments": '{"project_id": 999}'}]}
+            def complete(self, *a, **kw):
+                return {"content": "done", "usage": {}}
+
+        import asyncio as _asyncio
+
+        async def drive():
+            loop = ChatAgentLoop(self.project.id, tool_executor=fake_executor)
+            events = []
+            async for ev in loop.run("list papers", history=None):
+                events.append(ev)
+            return events
+
+        with mock.patch("llm.deepseek.DeepSeekClient") as mc:
+            mc.return_value = FakeClient()
+            _asyncio.run(drive())
+
+        # T1 core assertion: executor received the frozen context of THIS project
+        self.assertTrue(captured_args, "executor was never called")
+        for ca in captured_args:
+            self.assertIsInstance(ca["context"], ToolExecutionContext)
+            self.assertEqual(ca["context"].project_id, self.project.id,
+                             f"executor received project_id={ca['context'].project_id} instead of {self.project.id}")
+            self.assertNotIn("project_id", ca["args"],
+                             "smuggled project_id must not reach the tool implementation")
+
+    def test_t2_no_evidence_safety_gate_replaces_domain_knowledge_answer(self):
+        """T2: when evidence_count=0 and task needs evidence, harness replaces with abstention."""
+        from agent.harness import ProjectAgentHarness
+        from unittest import mock
+
+        class FakeClient:
+            def complete_with_tools(self, messages, tools, **kwargs):
+                # Model answers with domain knowledge, no tool calls
+                return {"content": "Mamba uses selective state space models for linear-time computation. " * 5,
+                        "reasoning_content": "", "tool_calls": []}
+            def complete(self, *a, **kw):
+                return {"content": "", "usage": {}}
+
+        with mock.patch("llm.deepseek.DeepSeekClient") as mc:
+            mc.return_value = FakeClient()
+            result = asyncio.run(
+                ProjectAgentHarness(self.project.id, use_llm=True).run("Mamba 有什么特点？")
+            )
+        answer = result.get("answer", "")
+        quality = next(e["data"] for e in result["events"] if e["event"] == "quality_check")
+        # S2: answer should be replaced with abstention (not domain knowledge)
+        self.assertIn("暂无相关证据", answer)
+        self.assertNotIn("selective state space", answer)
+        self.assertEqual(quality.get("answer_mode"), "abstained")

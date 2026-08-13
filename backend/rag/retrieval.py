@@ -12,9 +12,10 @@ import numpy as np
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import connection
+from django.db.models import F, Q
 from pydantic import BaseModel
 
-from .embedding import embed, embedding_metadata
+from .embedding import embed, embedding_metadata, get_provider
 from .models import Evidence, Text
 from .store import NumpyVectorStore
 
@@ -107,7 +108,7 @@ async def hybrid_retrieve_texts(
     if connection.vendor == "postgresql":
         try:
             dense, lexical = await sync_to_async(_postgres_hybrid_candidates)(
-                question, query_vec, paper_ids, dense_k, lexical_k
+                question, query_vec, paper_ids, dense_k, lexical_k, meta
             )
             backend = "postgres_pgvector_fts"
         except Exception as exc:
@@ -120,14 +121,22 @@ async def hybrid_retrieve_texts(
                 },
             )
             dense, lexical = await sync_to_async(_python_hybrid_candidates)(
-                question, query_vec, paper_ids, dense_k, lexical_k, store
+                question, query_vec, paper_ids, dense_k, lexical_k, store, meta
             )
             backend = "python_fallback"
     else:
         dense, lexical = await sync_to_async(_python_hybrid_candidates)(
-            question, query_vec, paper_ids, dense_k, lexical_k, store
+            question, query_vec, paper_ids, dense_k, lexical_k, store, meta
         )
         backend = "python_fallback"
+
+    # 若 provider 支持 sparse（BGE-M3），用 sparse 词级权重重排 dense 候选作为 lexical 路
+    provider = get_provider()
+    if hasattr(provider, "encode_query_sparse") and dense:
+        query_sparse = await sync_to_async(provider.encode_query_sparse)(question)
+        if query_sparse:
+            lexical = _sparse_rerank(dense, query_sparse, lexical_k)
+            backend = backend.replace("fts", "sparse") if "fts" in backend else "python_sparse"
 
     fused = rrf_fuse(dense, lexical, limit=limit, rrf_k=rrf_k)
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -149,6 +158,23 @@ async def hybrid_retrieve_texts(
         },
     )
     return fused
+
+
+def _sparse_rerank(dense: list[Text], query_sparse: dict[str, float], k: int) -> list[Text]:
+    """对 dense 候选按 sparse 词级权重点积重排，作为 lexical 路。
+
+    query_sparse: {token_id_str: weight}（来自 BGE-M3 query 编码）。
+    每个 Text 的 sparse_weights 也是 {token_id_str: weight}，点积越大越相关。
+    """
+    scored = []
+    for text in dense:
+        doc_sparse = getattr(text, "sparse_weights", None) or {}
+        if not doc_sparse:
+            continue
+        score = sum(w * doc_sparse.get(tok, 0.0) for tok, w in query_sparse.items())
+        scored.append((score, text))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [t for _s, t in scored[:k]]
 
 
 def rrf_fuse(
@@ -177,47 +203,79 @@ def _postgres_hybrid_candidates(
     paper_ids: list[int] | None,
     dense_k: int,
     lexical_k: int,
+    meta: dict[str, Any],
 ) -> tuple[list[Text], list[Text]]:
-    dense_ids = _postgres_dense_ids(query_vec, paper_ids, dense_k)
-    lexical_ids = _postgres_lexical_ids(question, paper_ids, lexical_k)
+    dense_ids = _postgres_dense_ids(query_vec, paper_ids, dense_k, meta)
+    lexical_ids = _postgres_lexical_ids(question, paper_ids, lexical_k, meta)
     return _texts_by_ids(dense_ids), _texts_by_ids(lexical_ids)
 
 
-def _postgres_dense_ids(query_vec: np.ndarray, paper_ids: list[int] | None, k: int) -> list[int]:
-    where, params = _paper_scope_sql(paper_ids)
-    sql = f"""
-        SELECT id
-        FROM rag_text
-        {where}
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-    """
-    params.extend([_vector_literal(query_vec), k])
-    with connection.cursor() as cursor:
-        cursor.execute(sql, params)
-        return [row[0] for row in cursor.fetchall()]
-
-
-def _postgres_lexical_ids(question: str, paper_ids: list[int] | None, k: int) -> list[int]:
-    where, params = _paper_scope_sql(paper_ids, prefix="WHERE")
+def _postgres_dense_ids(
+    query_vec: np.ndarray, paper_ids: list[int] | None, k: int,
+    meta: dict[str, Any],
+) -> list[int]:
+    where, params = _paper_scope_sql(paper_ids, alias="t.")
     scope = f"{where} AND" if where else "WHERE"
     sql = f"""
-        SELECT id
-        FROM rag_text
-        {scope} to_tsvector('english', search_vector) @@ plainto_tsquery('english', %s)
-        ORDER BY ts_rank_cd(to_tsvector('english', search_vector), plainto_tsquery('english', %s)) DESC
+        SELECT t.id
+        FROM rag_text t
+        JOIN rag_paperindexversion piv ON piv.id = t.index_version_id
+        {scope} piv.status = 'active'
+          AND piv.embedding_model = %s AND piv.embedding_version = %s
+          AND piv.embedding_dim = %s
+          AND t.embedding_model = piv.embedding_model
+          AND t.embedding_version = piv.embedding_version
+          AND t.embedding_dim = piv.embedding_dim
+        ORDER BY t.embedding <=> %s::vector
         LIMIT %s
     """
-    params.extend([question, question, k])
+    params.extend([meta["embedding_model"], meta["embedding_version"],
+                   meta["embedding_dim"], _vector_literal(query_vec), k])
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         return [row[0] for row in cursor.fetchall()]
 
 
-def _paper_scope_sql(paper_ids: list[int] | None, prefix: str = "WHERE") -> tuple[str, list[Any]]:
-    if not paper_ids:
+def _postgres_lexical_ids(
+    question: str, paper_ids: list[int] | None, k: int,
+    meta: dict[str, Any],
+) -> list[int]:
+    where, params = _paper_scope_sql(paper_ids, alias="t.")
+    scope = f"{where} AND" if where else "WHERE"
+    sql = f"""
+        SELECT t.id
+        FROM rag_text t
+        JOIN rag_paperindexversion piv ON piv.id = t.index_version_id
+        {scope} piv.status = 'active'
+          AND piv.embedding_model = %s AND piv.embedding_version = %s
+          AND piv.embedding_dim = %s
+          AND t.embedding_model = piv.embedding_model
+          AND t.embedding_version = piv.embedding_version
+          AND t.embedding_dim = piv.embedding_dim
+          AND to_tsvector('english', t.search_vector) @@ plainto_tsquery('english', %s)
+        ORDER BY ts_rank_cd(to_tsvector('english', t.search_vector), plainto_tsquery('english', %s)) DESC
+        LIMIT %s
+    """
+    params.extend([meta["embedding_model"], meta["embedding_version"],
+                   meta["embedding_dim"], question, question, k])
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return [row[0] for row in cursor.fetchall()]
+
+
+def _paper_scope_sql(
+    paper_ids: list[int] | None, prefix: str = "WHERE", alias: str = "",
+) -> tuple[str, list[Any]]:
+    """Scope SQL with explicit None/[] semantics (Task 2.6).
+
+    None -> NO scope clause (bottom-level retriever is global by contract; the
+           project boundary is enforced by the resolver / project wrapper).
+    []   -> FAIL CLOSED: an explicit empty set matches NOTHING. It must never
+           degrade to a full-library query.
+    """
+    if paper_ids is None:
         return "", []
-    return f"{prefix} paper_id = ANY(%s)", [paper_ids]
+    return f"{prefix} {alias}paper_id = ANY(%s)", [paper_ids]
 
 
 def _texts_by_ids(ids: list[int]) -> list[Text]:
@@ -234,17 +292,36 @@ def _python_hybrid_candidates(
     dense_k: int,
     lexical_k: int,
     store: NumpyVectorStore | None,
+    meta: dict[str, Any],
 ) -> tuple[list[Text], list[Text]]:
-    qs = Text.objects.select_related("paper", "paper__venue").all()
-    if paper_ids:
+    qs = Text.objects.select_related("paper", "paper__venue").filter(
+        index_version__status="active",
+        embedding_model=meta["embedding_model"],
+        embedding_version=meta["embedding_version"],
+        embedding_dim=meta["embedding_dim"],
+        # chunk metadata must be consistent with its own index version row
+    ).filter(
+        Q(embedding_model=F("index_version__embedding_model"))
+        & Q(embedding_version=F("index_version__embedding_version"))
+        & Q(embedding_dim=F("index_version__embedding_dim"))
+    )
+    if paper_ids is not None:
+        # [] -> empty queryset (fail closed, Task 2.6); never the full library.
         qs = qs.filter(paper_id__in=paper_ids)
     texts = list(qs)
     if not texts:
         return [], []
-    dense_store = store or NumpyVectorStore()
-    if store is None:
-        dense_store.build_from(texts)
+    # §21.3/§22: a caller-supplied prebuilt store may contain stale / foreign /
+    # out-of-scope Texts, and filtering AFTER a Top-K search can starve legal
+    # candidates (forbidden items occupying the top K). Rebuild the store from
+    # the scoped+active texts for THIS query so dense candidates are searched
+    # entirely within the allowed set; the allowed-ids intersection below stays
+    # as defense in depth.
+    allowed_ids = set(text.id for text in texts)
+    dense_store = NumpyVectorStore()
+    dense_store.build_from(texts)
     dense = dense_store.search(query_vec, k=dense_k)
+    dense = [t for t in dense if t.id in allowed_ids]
     lexical = _python_lexical_search(question, texts, lexical_k)
     return dense, lexical
 

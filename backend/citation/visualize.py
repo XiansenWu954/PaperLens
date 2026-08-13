@@ -21,10 +21,21 @@ def to_vis_data(G: nx.Graph, labels: dict) -> dict:
     except Exception:
         pos = {n: (0.0, 0.0) for n in G.nodes()}
 
+    # 每个 cluster 取 pagerank(seminal) 最高的论文标题前缀作为主题标签
+    cluster_best: dict[int, tuple[float, str]] = {}
+    for n, lab in labels.items():
+        cid = lab.get("cluster", 0)
+        seminal = lab.get("seminal", 0)
+        p = G.nodes[n].get("paper")
+        title = (p.title[:40] if p else "")
+        if title and (cid not in cluster_best or seminal > cluster_best[cid][0]):
+            cluster_best[cid] = (seminal, title)
+
     nodes = []
     for n in G.nodes():
         p = G.nodes[n].get("paper")
         lab = labels.get(n, {})
+        cluster = lab.get("cluster", 0)
         nodes.append(
             {
                 "id": n,
@@ -33,7 +44,8 @@ def to_vis_data(G: nx.Graph, labels: dict) -> dict:
                 "citation_count": (p.citation_count if p else 0),
                 "size": max(1, (p.citation_count if p else 1)),  # ∝ 引用数，下限 1
                 "color_year": (p.year if p else None),  # 前端按年份映射颜色
-                "cluster": lab.get("cluster", 0),
+                "cluster": cluster,
+                "cluster_label": cluster_best.get(cluster, (0, f"主题 {cluster}"))[1],
                 "is_root": lab.get("is_root", False),
                 "is_frontier": lab.get("is_frontier", False),
                 "seminal": lab.get("seminal", 0),

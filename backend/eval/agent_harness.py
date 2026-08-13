@@ -20,6 +20,9 @@ class AgentHarnessCase:
     requires_source_marker: bool = False
     expects_blocked: bool = False
     requires_network: bool = False
+    # Precedence the tools should run in when they appear together (manual §6.2
+    # Ordering Accuracy). None means order does not matter for this case.
+    expected_order: tuple[str, ...] | None = None
 
 
 PROJECT_AGENT_EVAL_CASES = [
@@ -40,6 +43,7 @@ PROJECT_AGENT_EVAL_CASES = [
         required_events=("intent_detected", "tool_call", "evidence", "quality_check", "done"),
         requires_evidence=True,
         requires_source_marker=True,
+        expected_order=("query_project_rag", "draft_report_section"),
     ),
     AgentHarnessCase(
         id="project_library_inventory",
@@ -63,6 +67,7 @@ PROJECT_AGENT_EVAL_CASES = [
         required_events=("intent_detected", "tool_call", "paper_added", "evidence", "quality_check", "done"),
         requires_evidence=True,
         requires_network=True,
+        expected_order=("search_papers", "add_papers_to_project", "query_project_rag"),
     ),
     AgentHarnessCase(
         id="search_add_report_combined",
@@ -73,6 +78,7 @@ PROJECT_AGENT_EVAL_CASES = [
         requires_evidence=True,
         requires_source_marker=True,
         requires_network=True,
+        expected_order=("search_papers", "add_papers_to_project", "query_project_rag", "draft_report_section"),
     ),
     AgentHarnessCase(
         id="destructive_action_blocked",
@@ -104,7 +110,9 @@ def tool_policy_summary() -> dict[str, Any]:
     }
 
 
-async def _offline_tool_executor(name: str, args: dict[str, Any]) -> dict[str, Any]:
+async def _offline_tool_executor(
+    context, name: str, args: dict[str, Any]
+) -> dict[str, Any]:
     if name == "search_papers":
         return {
             "papers": [
@@ -127,6 +135,9 @@ async def _offline_tool_executor(name: str, args: dict[str, Any]) -> dict[str, A
                     "title": "Fixture Paper for Tool Calling",
                     "summary": "Fixture evidence",
                     "citation": "pqac-fixture",
+                    "source_marker": "pqac-fixture",
+                    "project_id": context.project_id,
+                    "evidence_type": "metadata",
                 }
             ],
             "fallback": "",
@@ -138,7 +149,9 @@ async def _offline_tool_executor(name: str, args: dict[str, Any]) -> dict[str, A
     if name == "draft_report_section":
         return {
             "section": "## Fixture section\n\n- Fixture evidence (pqac-fixture)",
-            "evidence": [{"title": "Fixture Paper for Tool Calling", "citation": "pqac-fixture"}],
+            "evidence": [{"title": "Fixture Paper for Tool Calling", "citation": "pqac-fixture",
+                          "source_marker": "pqac-fixture", "project_id": context.project_id,
+                          "evidence_type": "metadata"}],
         }
     return {"error": f"unknown fixture tool {name}"}
 
@@ -163,6 +176,21 @@ async def run_project_agent_eval(project_id: int, include_network: bool = False)
             for event in events
             if event["event"] == "tool_call" and isinstance(event.get("data"), dict)
         ]
+        # Preserve full per-call {name, arguments} so downstream tool-decision
+        # metrics (precision/recall/ordering/redundancy/argument-validity,
+        # manual §6.2) can be computed without re-reading the DB.
+        tool_calls = [
+            {"name": data.get("name"), "arguments": data.get("arguments", {})}
+            for event in events
+            if event["event"] == "tool_call"
+            and isinstance((data := event.get("data")), dict)
+        ]
+        # Number of distinct ReAct iterations observed (0 in deterministic mode).
+        iteration_count = max(
+            (data.get("iteration", 0) for event in events
+             if event["event"] == "tool_call" and isinstance((data := event.get("data")), dict)),
+            default=0,
+        )
         missing_events = [name for name in case.required_events if name not in event_names]
         missing_tools = [name for name in case.expected_tools if name not in tool_names]
         forbidden_observed = [name for name in case.forbidden_tools if name in tool_names]
@@ -171,10 +199,16 @@ async def run_project_agent_eval(project_id: int, include_network: bool = False)
         source_markers = _source_markers(events)
         answer = result["answer"].strip()
         source_marker_present = _answer_has_source_marker(answer, source_markers)
+        safety_replaced = _safety_replaced(events)
         intent_passed = detected_intent == case.expected_intent
         blocked_passed = blocked is True if case.expects_blocked else blocked is not True
         evidence_passed = evidence_count > 0 if case.requires_evidence else True
         source_passed = source_marker_present if case.requires_source_marker else True
+        # Task 4.x: a capability-policy fail-closed abstention (safety_replaced)
+        # is a COMPLIANT outcome — the fixture has only metadata evidence, so
+        # source markers are intentionally absent from the user-visible answer.
+        if case.requires_source_marker and safety_replaced:
+            source_passed = True
         passed = (
             intent_passed
             and blocked_passed
@@ -191,6 +225,7 @@ async def run_project_agent_eval(project_id: int, include_network: bool = False)
                 "passed": passed,
                 "expected_intent": case.expected_intent,
                 "expected_tools": list(case.expected_tools),
+                "expected_order": list(case.expected_order) if case.expected_order else None,
                 "detected_intent": detected_intent,
                 "blocked": blocked,
                 "missing_events": missing_events,
@@ -199,11 +234,14 @@ async def run_project_agent_eval(project_id: int, include_network: bool = False)
                 "evidence_count": evidence_count,
                 "quality_verdict": quality_verdict,
                 "source_marker_present": source_marker_present,
+                "safety_replaced": safety_replaced,
                 "duration_ms": duration_ms,
                 "event_count": len(events),
                 "tool_count": len(tool_names),
+                "iteration_count": iteration_count,
                 "events": event_names,
                 "tools": tool_names,
+                "tool_calls": tool_calls,
                 "answer_preview": answer[:300],
                 "mode": "real" if include_network or not case.requires_network else "offline-fixture",
             }
@@ -211,6 +249,10 @@ async def run_project_agent_eval(project_id: int, include_network: bool = False)
 
     policy = tool_policy_summary()
     passed = policy["passed"] and all(item.get("passed", True) for item in results)
+    # Attach project_id onto each case so aggregate_tool_metrics can check
+    # argument validity against the correct project scope.
+    for item in results:
+        item["project_id"] = project_id
     return {"passed": passed, "policy": policy, "cases": results}
 
 
@@ -237,8 +279,10 @@ def _evidence_count(events: list[dict[str, Any]]) -> int:
     for event in events:
         if event["event"] != "evidence":
             continue
-        evidence = event.get("data", {}).get("evidence") or []
-        total += len(evidence)
+        # Tasks 5.x (§28.1): evidence events carry only the count — never the
+        # evidence items/excerpts.
+        data = event.get("data") or {}
+        total += int(data.get("evidence_count") or 0)
     return total
 
 
@@ -249,19 +293,27 @@ def _quality_verdict(events: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _safety_replaced(events: list[dict[str, Any]]) -> bool:
+    for event in events:
+        if event["event"] == "quality_check":
+            return bool(event.get("data", {}).get("safety_replaced", False))
+    return False
+
+
 def _source_markers(events: list[dict[str, Any]]) -> set[str]:
     markers: set[str] = set()
     for event in events:
         data = event.get("data") or {}
-        if event["event"] == "evidence":
-            for item in data.get("evidence") or []:
-                for key in ("source_marker", "citation", "title", "docname"):
-                    marker = str(item.get(key) or "").strip()
-                    if marker:
-                        markers.add(marker)
+        # Tasks 5.x: evidence events carry only counts; citation markers come
+        # from the quality_check citations (marker is an allowlisted field).
+        if event["event"] == "quality_check":
+            for item in data.get("citations") or []:
+                marker = str(item.get("marker") or "").strip()
+                if marker:
+                    markers.add(marker)
         if event["event"] == "paper_added":
-            for item in data.get("added") or []:
-                marker = str(item.get("title") or "").strip()
+            for title in data.get("added_titles") or []:
+                marker = str(title or "").strip()
                 if marker:
                     markers.add(marker)
     return markers

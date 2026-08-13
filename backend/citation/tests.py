@@ -98,6 +98,52 @@ class PercentileTest(TransactionTestCase):
         self.assertEqual(_percentile([], 80), 0)
 
 
+class ConnectionPathTest(TransactionTestCase):
+    def test_direct_connection(self):
+        from citation.paths import find_connection_path
+
+        A = _FakePaper(1, ["W1", "W2"], "A")
+        B = _FakePaper(2, ["W1", "W2"], "B")
+        G = build_similarity_graph([A, B])
+        result = find_connection_path(G, 1, 2)
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["path"], [1, 2])
+        self.assertEqual(result["hops"], 1)
+        self.assertEqual(len(result["nodes"]), 2)
+
+    def test_no_connection(self):
+        from citation.paths import find_connection_path
+
+        A = _FakePaper(1, ["W1"], "A")
+        B = _FakePaper(2, ["W2"], "B")
+        G = build_similarity_graph([A, B])
+        result = find_connection_path(G, 1, 2)
+        self.assertFalse(result["reachable"])
+
+    def test_multi_hop_path(self):
+        from citation.paths import find_connection_path
+
+        # A-B 共享 W1，B-C 共享 W2，A-C 不直接相连
+        A = _FakePaper(1, ["W1"], "A")
+        B = _FakePaper(2, ["W1", "W2"], "B")
+        C = _FakePaper(3, ["W2"], "C")
+        G = build_similarity_graph([A, B, C])
+        result = find_connection_path(G, 1, 3)
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["path"], [1, 2, 3])
+        self.assertEqual(result["hops"], 2)
+
+    def test_same_node(self):
+        from citation.paths import find_connection_path
+
+        A = _FakePaper(1, ["W1"], "A")
+        G = build_similarity_graph([A])
+        result = find_connection_path(G, 1, 1)
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["hops"], 0)
+
+
+
 class VisDataTest(TransactionTestCase):
     def test_vis_structure(self):
         A = _FakePaper(1, ["W1", "W2"], "A", year=2024, citation_count=42)

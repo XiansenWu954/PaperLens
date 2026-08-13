@@ -69,7 +69,9 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
-    command: celery -A config worker -l info
+    # --concurrency=1 -P solo: BGE-M3 is ~2GB resident; forking N workers would
+    # each lazily load it and risk OOM. Solo pool keeps one in-memory model.
+    command: celery -A config worker -l info --concurrency=1 -P solo
 
   frontend:
     build:

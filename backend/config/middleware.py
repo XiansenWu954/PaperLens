@@ -37,8 +37,11 @@ class RequestIDMiddleware:
             )
             return response
         except Exception as exc:
+            # §30.3: no logger.exception (raw exception message) — type only.
+            from agent.events import error_hash
+
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            logger.exception(
+            logger.error(
                 "request failed",
                 extra={
                     "event": "request_failed",
@@ -46,6 +49,7 @@ class RequestIDMiddleware:
                     "path": request.path,
                     "duration_ms": duration_ms,
                     "error": exc.__class__.__name__,
+                    "error_hash": error_hash(exc),
                 },
             )
             raise
