@@ -18,7 +18,8 @@ function paper(overrides: Partial<ProjectPaper> = {}): ProjectPaper {
     arxiv_id: '1706.03762', openalex_id: null, pdf_url: null, status: 'included',
     source_reason: '', added_by: 'user', notes: '', ingestion_status: 'embedded',
     latest_ingestion_job_id: null, latest_ingestion_error: '', embedding_model: '',
-    indexed_at: null, chunk_count: 5, created_at: '', updated_at: '', ...overrides,
+    indexed_at: null, chunk_count: 5, fulltext_ready: false,
+    latest_job_retryable: false, created_at: '', updated_at: '', ...overrides,
   }
 }
 

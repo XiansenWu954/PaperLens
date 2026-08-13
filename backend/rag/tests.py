@@ -13,6 +13,33 @@ from rag.ingest import chunk_text, ingest_pdf_bytes
 from rag.store import NumpyVectorStore
 
 
+def _active_version(paper):
+    """Test fixture: the CURRENT active index version for a paper.
+
+    Reuses an existing active row (the DB enforces one active version per
+    paper) or creates one carrying the fake provider's embedding metadata, so
+    active_only retrieval (ING-B-CX-05) can find chunks attached to it.
+    """
+    from rag.embedding import embedding_metadata
+    from rag.models import PaperIndexVersion
+
+    meta = embedding_metadata()
+    version = PaperIndexVersion.objects.filter(
+        paper=paper, status="active").order_by("-id").first()
+    if version is None:
+        version = PaperIndexVersion.objects.create(
+            paper=paper, status="active",
+            source_sha256="active-fixture",
+            pipeline_signature="test-active-v1",
+            parser_identity="test",
+            chunk_config_hash="test-v1",
+            embedding_model=meta["embedding_model"],
+            embedding_version=meta["embedding_version"],
+            embedding_dim=int(meta["embedding_dim"]),
+        )
+    return version
+
+
 class NetworkGuardTest(TransactionTestCase):
     """GPT v5: verify test environment has socket-level network-blocking guards."""
 
@@ -213,9 +240,10 @@ class RetrieveEvidenceFilterTest(TransactionTestCase):
         import asyncio
 
         paper = upsert_paper({"arxiv_id": "9999.99999", "title": "Filter Test", "year": 2024})
+        _v_ft = _active_version(paper)
         for i in range(3):
             Text.objects.create(
-                paper=paper, docname=f"ft chunk{i}", chunk_index=i,
+                paper=paper, index_version=_v_ft, docname=f"ft chunk{i}", chunk_index=i,
                 content=f"content {i}", embedding=[float(i)] + [0.0]*1023, citation_key="pqac-ft1",
                 embedding_model="fake-hash-embedding", embedding_version="fake-hash-embedding:v1",
             )
@@ -239,8 +267,9 @@ class RetrieveEvidenceFilterTest(TransactionTestCase):
         import asyncio
 
         paper = upsert_paper({"arxiv_id": "9999.99998", "title": "Keep Test", "year": 2024})
+        _v_kt = _active_version(paper)
         Text.objects.create(
-            paper=paper, docname="kt chunk0", chunk_index=0,
+            paper=paper, index_version=_v_kt, docname="kt chunk0", chunk_index=0,
             content="good", embedding=[1.0] + [0.0]*1023, citation_key="pqac-kt1",
                 embedding_model="fake-hash-embedding", embedding_version="fake-hash-embedding:v1",
         )
@@ -325,30 +354,33 @@ class HybridRetrievalTest(TransactionTestCase):
         import asyncio
 
         paper = upsert_paper({"arxiv_id": "9999.99124", "title": "Hybrid Retrieval Test", "year": 2026})
+        _v = _active_version(paper)
         lexical = Text.objects.create(
             paper=paper,
+            index_version=_v,
             docname="lexical chunk",
             chunk_index=0,
             content="Postgres full text search uses tsvector and tsquery for exact lexical retrieval.",
             search_vector="Postgres full text search tsvector tsquery exact lexical retrieval",
-            embedding=[0.0] + [1.0] + [0.0]*1022, embedding_model="fake",
-            embedding_version="fake:v1",
+            embedding=[0.0] + [1.0] + [0.0]*1022, embedding_model="fake-hash-embedding",
+            embedding_version="fake-hash-embedding:v1",
             citation_key="pqac-lexical",
         )
         Text.objects.create(
             paper=paper,
+            index_version=_v,
             docname="dense chunk",
             chunk_index=1,
             content="Unrelated dense candidate",
             search_vector="unrelated dense candidate",
-            embedding=[1.0] + [0.0]*1023, embedding_model="fake",
-            embedding_version="fake:v1",
+            embedding=[1.0] + [0.0]*1023, embedding_model="fake-hash-embedding",
+            embedding_version="fake-hash-embedding:v1",
             citation_key="pqac-dense",
         )
 
         with (
             mock.patch("rag.retrieval.embed", return_value=np.array([[1.0, 0.0]], dtype=np.float32)),
-            mock.patch("rag.retrieval.embedding_metadata", return_value={"embedding_model": "fake", "embedding_dim": 2, "embedding_version": "fake:v1"}),
+            mock.patch("rag.retrieval.embedding_metadata", return_value={"embedding_model": "fake-hash-embedding", "embedding_dim": 1024, "embedding_version": "fake-hash-embedding:v1"}),
         ):
             results = asyncio.run(hybrid_retrieve_texts("tsvector tsquery lexical", paper_ids=[paper.id], final_k=2))
 

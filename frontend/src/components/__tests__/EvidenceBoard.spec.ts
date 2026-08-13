@@ -33,6 +33,8 @@ function makePaper(overrides: Partial<ProjectPaper> = {}): ProjectPaper {
     embedding_model: '',
     indexed_at: null,
     chunk_count: 0,
+    fulltext_ready: false,
+    latest_job_retryable: false,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     ...overrides,
@@ -105,7 +107,7 @@ describe('EvidenceBoard', () => {
   })
 
   it('emits uploadPdf when a file is selected', async () => {
-    const paper = makePaper()
+    const paper = makePaper({ ingestion_status: 'embedded' })
     const wrapper = mount(EvidenceBoard, { props: { papers: [paper] } })
     const file = new File(['pdf-bytes'], 'paper.pdf', { type: 'application/pdf' })
     const input = wrapper.find('input[type="file"]')
@@ -125,7 +127,7 @@ describe('EvidenceBoard', () => {
   })
 
   it('emits ingestPdf when the ingest button is clicked (paper has pdf_url)', async () => {
-    const paper = makePaper()
+    const paper = makePaper({ ingestion_status: 'embedded' })
     const wrapper = mount(EvidenceBoard, { props: { papers: [paper] } })
     const ingestBtn = wrapper.findAll('button').find((b) => b.text().includes('从链接入库'))!
     await ingestBtn.trigger('click')
@@ -150,5 +152,87 @@ describe('EvidenceBoard', () => {
     await wrapper.findAll('button').find((b) => b.text() === '移出项目')!.trigger('click')
     await wrapper.find('.danger-button').trigger('click')
     expect(wrapper.emitted('remove')?.[0]).toEqual([7])
+  })
+})
+
+describe('EvidenceBoard ingestion lifecycle (Tasks 5.5)', () => {
+  const lifecycleStates = ['downloading', 'parsing', 'embedding', 'committing'] as const
+
+  it.each(lifecycleStates)('renders the %s intermediate state distinctly', (state) => {
+    const wrapper = mount(EvidenceBoard, {
+      props: { papers: [makePaper({ ingestion_status: state })] },
+    })
+    const expected = state === 'downloading' ? '下载中'
+      : state === 'parsing' ? '解析中'
+        : state === 'embedding' ? '向量化中' : '提交中'
+    expect(wrapper.text()).toContain(expected)
+  })
+
+  it('disables duplicate upload/ingest commands while a job is active', () => {
+    for (const state of ['pending', 'downloading', 'parsing', 'embedding', 'committing']) {
+      const wrapper = mount(EvidenceBoard, {
+        props: { papers: [makePaper({ ingestion_status: state as ProjectPaper['ingestion_status'] })] },
+      })
+      const buttons = wrapper.findAll('button')
+      // Vue renders boolean attributes as valueless (getAttribute -> ''),
+      // so "disabled" presence is attributes('disabled') !== undefined.
+      const actionable = buttons.filter((b) => b.attributes('disabled') === undefined)
+      const uploadInput = wrapper.find('input[type="file"]')
+      expect(actionable.length).toBeLessThan(buttons.length)
+      expect((uploadInput.element as HTMLInputElement).disabled).toBe(true)
+    }
+  })
+
+  it('offers a retry action only for failed retryable jobs', () => {
+    const retryable = makePaper({ ingestion_status: 'failed', latest_job_retryable: true, latest_ingestion_error: 'pdf_parse_failed' })
+    const wrapper = mount(EvidenceBoard, { props: { papers: [retryable] } })
+    const retryBtn = wrapper.findAll('button').find((b) => b.text() === '重试')
+    expect(retryBtn).toBeTruthy()
+
+    const nonRetryable = makePaper({ ingestion_status: 'failed', latest_job_retryable: false, latest_ingestion_error: 'unsafe_pdf_url' })
+    const wrapper2 = mount(EvidenceBoard, { props: { papers: [nonRetryable] } })
+    expect(wrapper2.findAll('button').find((b) => b.text() === '重试')).toBeUndefined()
+  })
+
+  it('emits retryJob for a failed retryable job', async () => {
+    const paper = makePaper({ paper_id: 5, id: 5, ingestion_status: 'failed', latest_job_retryable: true })
+    const wrapper = mount(EvidenceBoard, { props: { papers: [paper] } })
+    await wrapper.findAll('button').find((b) => b.text() === '重试')!.trigger('click')
+    expect(wrapper.emitted('retryJob')?.[0]).toEqual([5])
+  })
+
+  it('shows upload-required copy for a paper without a trusted PDF URL', () => {
+    const wrapper = mount(EvidenceBoard, {
+      props: { papers: [makePaper({ pdf_url: null, ingestion_status: 'pending' })] },
+    })
+    expect(wrapper.text()).toContain('待上传 PDF')
+    expect(wrapper.text()).toContain('上传 PDF')
+  })
+
+  it('never claims full-text readiness from a URL or membership alone', () => {
+    const wrapper = mount(EvidenceBoard, {
+      props: {
+        papers: [makePaper({
+          pdf_url: 'https://arxiv.org/pdf/x',
+          ingestion_status: 'embedded',
+          chunk_count: 0,
+          fulltext_ready: false,
+        })],
+      },
+    })
+    expect(wrapper.text()).not.toContain('全文已就绪')
+  })
+
+  it('renders full-text readiness only for an active index with chunks', () => {
+    const wrapper = mount(EvidenceBoard, {
+      props: {
+        papers: [makePaper({
+          ingestion_status: 'embedded',
+          chunk_count: 12,
+          fulltext_ready: true,
+        })],
+      },
+    })
+    expect(wrapper.text()).toContain('全文已就绪')
   })
 })

@@ -12,6 +12,7 @@ import numpy as np
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import connection
+from django.db.models import F, Q
 from pydantic import BaseModel
 
 from .embedding import embed, embedding_metadata, get_provider
@@ -213,17 +214,23 @@ def _postgres_dense_ids(
     query_vec: np.ndarray, paper_ids: list[int] | None, k: int,
     meta: dict[str, Any],
 ) -> list[int]:
-    where, params = _paper_scope_sql(paper_ids)
+    where, params = _paper_scope_sql(paper_ids, alias="t.")
     scope = f"{where} AND" if where else "WHERE"
     sql = f"""
-        SELECT id
-        FROM rag_text
-        {scope} embedding_model = %s AND embedding_version = %s
-        ORDER BY embedding <=> %s::vector
+        SELECT t.id
+        FROM rag_text t
+        JOIN rag_paperindexversion piv ON piv.id = t.index_version_id
+        {scope} piv.status = 'active'
+          AND piv.embedding_model = %s AND piv.embedding_version = %s
+          AND piv.embedding_dim = %s
+          AND t.embedding_model = piv.embedding_model
+          AND t.embedding_version = piv.embedding_version
+          AND t.embedding_dim = piv.embedding_dim
+        ORDER BY t.embedding <=> %s::vector
         LIMIT %s
     """
     params.extend([meta["embedding_model"], meta["embedding_version"],
-                   _vector_literal(query_vec), k])
+                   meta["embedding_dim"], _vector_literal(query_vec), k])
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         return [row[0] for row in cursor.fetchall()]
@@ -233,24 +240,32 @@ def _postgres_lexical_ids(
     question: str, paper_ids: list[int] | None, k: int,
     meta: dict[str, Any],
 ) -> list[int]:
-    where, params = _paper_scope_sql(paper_ids, prefix="WHERE")
+    where, params = _paper_scope_sql(paper_ids, alias="t.")
     scope = f"{where} AND" if where else "WHERE"
     sql = f"""
-        SELECT id
-        FROM rag_text
-        {scope} embedding_model = %s AND embedding_version = %s
-          AND to_tsvector('english', search_vector) @@ plainto_tsquery('english', %s)
-        ORDER BY ts_rank_cd(to_tsvector('english', search_vector), plainto_tsquery('english', %s)) DESC
+        SELECT t.id
+        FROM rag_text t
+        JOIN rag_paperindexversion piv ON piv.id = t.index_version_id
+        {scope} piv.status = 'active'
+          AND piv.embedding_model = %s AND piv.embedding_version = %s
+          AND piv.embedding_dim = %s
+          AND t.embedding_model = piv.embedding_model
+          AND t.embedding_version = piv.embedding_version
+          AND t.embedding_dim = piv.embedding_dim
+          AND to_tsvector('english', t.search_vector) @@ plainto_tsquery('english', %s)
+        ORDER BY ts_rank_cd(to_tsvector('english', t.search_vector), plainto_tsquery('english', %s)) DESC
         LIMIT %s
     """
     params.extend([meta["embedding_model"], meta["embedding_version"],
-                   question, question, k])
+                   meta["embedding_dim"], question, question, k])
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         return [row[0] for row in cursor.fetchall()]
 
 
-def _paper_scope_sql(paper_ids: list[int] | None, prefix: str = "WHERE") -> tuple[str, list[Any]]:
+def _paper_scope_sql(
+    paper_ids: list[int] | None, prefix: str = "WHERE", alias: str = "",
+) -> tuple[str, list[Any]]:
     """Scope SQL with explicit None/[] semantics (Task 2.6).
 
     None -> NO scope clause (bottom-level retriever is global by contract; the
@@ -260,7 +275,7 @@ def _paper_scope_sql(paper_ids: list[int] | None, prefix: str = "WHERE") -> tupl
     """
     if paper_ids is None:
         return "", []
-    return f"{prefix} paper_id = ANY(%s)", [paper_ids]
+    return f"{prefix} {alias}paper_id = ANY(%s)", [paper_ids]
 
 
 def _texts_by_ids(ids: list[int]) -> list[Text]:
@@ -280,8 +295,15 @@ def _python_hybrid_candidates(
     meta: dict[str, Any],
 ) -> tuple[list[Text], list[Text]]:
     qs = Text.objects.select_related("paper", "paper__venue").filter(
+        index_version__status="active",
         embedding_model=meta["embedding_model"],
         embedding_version=meta["embedding_version"],
+        embedding_dim=meta["embedding_dim"],
+        # chunk metadata must be consistent with its own index version row
+    ).filter(
+        Q(embedding_model=F("index_version__embedding_model"))
+        & Q(embedding_version=F("index_version__embedding_version"))
+        & Q(embedding_dim=F("index_version__embedding_dim"))
     )
     if paper_ids is not None:
         # [] -> empty queryset (fail closed, Task 2.6); never the full library.

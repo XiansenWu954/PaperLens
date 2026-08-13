@@ -201,11 +201,19 @@ class PaperRelation(models.Model):
 
 
 class PaperIngestionJob(models.Model):
-    """Background PDF ingestion job for one project paper."""
+    """Background PDF ingestion job for one project paper.
+
+    Tasks 2.3: extended lifecycle states, idempotency/source identity,
+    attempt/file metrics, safe error fields, optional global index-version
+    reference. Existing fields and rows stay compatible.
+    """
 
     STATUS_CHOICES = [
         ("pending", "Pending"),
+        ("downloading", "Downloading"),
         ("parsing", "Parsing"),
+        ("embedding", "Embedding"),
+        ("committing", "Committing"),
         ("embedded", "Embedded"),
         ("failed", "Failed"),
     ]
@@ -217,6 +225,22 @@ class PaperIngestionJob(models.Model):
         "papers.Paper", related_name="ingestion_jobs", on_delete=models.CASCADE
     )
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    # optional global build reference (Tasks 2.3); PROTECT so a referenced
+    # version cannot be deleted out from under the job (audit chain intact)
+    index_version = models.ForeignKey(
+        "rag.PaperIndexVersion", related_name="ingestion_jobs",
+        null=True, blank=True, on_delete=models.PROTECT,
+    )
+    # idempotency / source identity
+    idempotency_key = models.CharField(max_length=128, blank=True)
+    source_kind = models.CharField(max_length=16, blank=True,
+                                   default="")
+    # attempt / file metrics (attempts start at 0, incremented on execution)
+    attempt_count = models.IntegerField(default=0)
+    file_size = models.BigIntegerField(default=0)
+    # safe error classification (never raw exception text)
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    retryable = models.BooleanField(default=False)
     file_name = models.CharField(max_length=255, blank=True)
     file_hash = models.CharField(max_length=64, blank=True, db_index=True)
     file_path = models.CharField(max_length=512, blank=True)
@@ -229,6 +253,13 @@ class PaperIngestionJob(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "paper", "idempotency_key"],
+                name="uniq_ingestion_project_paper_key",
+                condition=~models.Q(idempotency_key=""),
+            ),
+        ]
         indexes = [
             models.Index(fields=["project", "paper", "status"], name="api_paperin_project_b19d8d_idx"),
             models.Index(fields=["file_hash"], name="api_paperin_file_ha_75a3f1_idx"),

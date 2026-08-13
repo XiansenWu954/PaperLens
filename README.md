@@ -132,12 +132,13 @@ CELERY_RESULT_BACKEND=redis://redis:6379/1
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
 PAPERLENS_PROJECT_CHAT_LIVE_LLM=1
-PAPERLENS_EMBEDDING_PROVIDER=qwen3-local
-PAPERLENS_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+PAPERLENS_EMBEDDING_PROVIDER=bge-m3
+PAPERLENS_EMBEDDING_MODEL=BAAI/bge-m3
 PAPERLENS_EMBEDDING_DIM=1024
 PAPERLENS_RAG_DENSE_K=20
 PAPERLENS_RAG_LEXICAL_K=20
 PAPERLENS_RAG_FINAL_K=8
+PAPERLENS_RAG_RRF_K=60
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
@@ -236,15 +237,20 @@ Recent local results:
 |---|---:|
 | Django system check | passed |
 | Docker PostgreSQL backend suite | 224 tests passed |
-| Stage B scope/evidence security gate | 169/169 cases passed |
-| Frontend Vitest suite | 54 tests passed |
+| Phase 1 ingestion/security gate | 240/240 cases passed |
+| Live BGE-M3 ingestion proof | passed |
+| Stage B scope/evidence security gate | passed |
+| Frontend Vitest suite | 64 tests passed |
+| Frontend ingestion red-spec suite | 8 tests passed |
 | Frontend production build | passed |
-| OpenSpec strict validation | 14/14 current specs passed |
+| OpenSpec strict validation | 15/15 current specs passed |
 
-These numbers are the reproducible Stage B baseline. They validate project
+These numbers are the reproducible Phase 1 baseline. They validate project
 scope, evidence identity, citation resolution, capability policy, event
-redaction, and interface compatibility. They do not claim current live-model
-answer quality. Real BGE-M3 retrieval and DeepSeek Agent quality are evaluated
+redaction, versioned PDF ingestion, safe acquisition, active-only indexing,
+Celery idempotency, ingestion lifecycle UI, and interface compatibility. They
+do not claim current live-model answer quality or large-scale Hybrid RAG
+quality. DeepSeek Agent quality and broader retrieval metrics are evaluated
 separately before a release metric is published.
 
 ## Notes

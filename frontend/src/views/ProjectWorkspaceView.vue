@@ -157,6 +157,20 @@ async function ingestPdf(paperId: number) {
   }
 }
 
+async function retryJob(paperId: number) {
+  // Tasks 5.5: retry the latest FAILED + retryable ingestion job (scoped)
+  pageError.value = ''
+  ingestionMessage.value = ''
+  try {
+    await store.retryIngestionJob(projectId.value, paperId)
+    ingestionMessage.value = '已重新排队入库任务。'
+    await store.loadProject(projectId.value)
+    await refreshGraph()
+  } catch (error) {
+    pageError.value = describeError(error, '重试入库失败')
+  }
+}
+
 async function saveReport(payload: { title: string; content: string; source?: string }) {
   return store.saveReport(projectId.value, payload)
 }
@@ -214,6 +228,7 @@ async function saveReport(payload: { title: string; content: string; source?: st
           @remove="removePaper"
           @upload-pdf="uploadPdf"
           @ingest-pdf="ingestPdf"
+          @retry-job="retryJob"
         />
 
         <section v-if="active === 'graph'" class="shell-panel graph-card">

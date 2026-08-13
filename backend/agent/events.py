@@ -267,15 +267,39 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         "node": "text", "status": "text", "evidence_count": "int_or_none",
         "fallback": "text"}},
     "ingestion_started": {"fields": {
-        "job_id": "int_or_none", "paper_id": "int_or_none"}},
+        "job_id": "int_or_none", "paper_id": "int_or_none",
+        "attempt_count": "int_or_none"}},
     "ingestion_progress": {"fields": {
         "job_id": "int_or_none", "status": "text"}},
+    "ingestion_retry": {"fields": {
+        "job_id": "int_or_none", "attempt_count": "int_or_none",
+        "error_code": "error_code", "error_hash": "text",
+        "retryable": "bool"}},
     "ingestion_completed": {"fields": {
         "job_id": "int_or_none", "paper_id": "int_or_none",
-        "chunk_count": "int_or_none"}},
+        "chunk_count": "int_or_none", "index_version_id": "int_or_none",
+        "reused": "bool", "fulltext_ready": "bool",
+        "duration_ms": "int_or_none"}},
     "ingestion_failed": {"fields": {
         "job_id": "int_or_none", "message": "error_code",
-        "error_hash": "text"}},
+        "error_code": "error_code", "error_hash": "text",
+        "retryable": "bool", "duration_ms": "int_or_none"}},
+    "ingestion_upload_queued": {"fields": {
+        "job_id": "int_or_none", "paper_id": "int_or_none",
+        "deduplicated": "bool", "reused": "bool",
+        "fulltext_ready": "bool"}},
+    "ingestion_url_queued": {"fields": {
+        "job_id": "int_or_none", "paper_id": "int_or_none",
+        "source_hash": "text", "deduplicated": "bool",
+        "reused": "bool", "fulltext_ready": "bool"}},
+    "ingestion_job_retried": {"fields": {
+        "job_id": "int_or_none", "paper_id": "int_or_none",
+        "retryable": "bool", "fulltext_ready": "bool"}},
+    "ingestion_agent_queued": {"fields": {
+        "job_id": "int_or_none", "paper_id": "int_or_none",
+        "reason": "text"}},
+    "ingestion_agent_skipped": {"fields": {
+        "paper_id": "int_or_none", "reason": "text"}},
 }
 
 # Event types that are never emitted/persisted (raw model answers).

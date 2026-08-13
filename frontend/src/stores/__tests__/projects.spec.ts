@@ -54,7 +54,8 @@ function project(overrides: Partial<ResearchProject> = {}): ResearchProject {
   return { id: 1, title: 'Mamba research', description: '', status: 'active', paper_count: 0, run_count: 0, latest_report_id: null, created_at: '', updated_at: '', ...overrides }
 }
 function paper(overrides: Partial<ProjectPaper> = {}): ProjectPaper {
-  return { id: 1, paper_id: 1, title: 'Mamba', abstract: '', year: 2023, venue: '', citation_count: 0, doi: null, arxiv_id: null, openalex_id: null, pdf_url: null, status: 'candidate', source_reason: '', added_by: 'user', notes: '', ingestion_status: 'pending', latest_ingestion_job_id: null, latest_ingestion_error: '', embedding_model: '', indexed_at: null, chunk_count: 0, created_at: '', updated_at: '', ...overrides }
+  return { id: 1, paper_id: 1, title: 'Mamba', abstract: '', year: 2023, venue: '', citation_count: 0, doi: null, arxiv_id: null, openalex_id: null, pdf_url: null, status: 'candidate', source_reason: '', added_by: 'user', notes: '', ingestion_status: 'pending', latest_ingestion_job_id: null, latest_ingestion_error: '', embedding_model: '', indexed_at: null, chunk_count: 0, fulltext_ready: false,
+    latest_job_retryable: false, created_at: '', updated_at: '', ...overrides }
 }
 
 beforeEach(() => {

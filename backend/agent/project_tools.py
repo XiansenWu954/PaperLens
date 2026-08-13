@@ -293,12 +293,36 @@ async def search_papers(query: str, max_results: int = 5) -> dict[str, Any]:
 
 
 async def add_papers_to_project(project_id: int, papers: list[dict], reason: str = "") -> dict[str, Any]:
-    from api.models import ProjectPaper, ResearchProject
-    from papers.models import upsert_paper
+    """Add papers to a project with Tasks 5.3 auto-queue semantics.
 
-    def _add() -> list[dict]:
+    Result collections separate the outcomes so the frontend never mistakes a
+    metadata membership for full-text ingestion:
+    - added:          memberships created/refreshed (all papers);
+    - queued:         papers WITH a trusted HTTPS PDF URL auto-queued for
+                      ingestion — at most THREE per call (Tasks 5.3);
+    - reused:         papers whose paper ALREADY has an active index or a
+                      completed job — never re-queued;
+    - deferred:       papers with a PDF URL beyond the three-per-call cap —
+                      no job is created in this call;
+    - upload_required: papers WITHOUT a PDF URL — ingestion needs an upload.
+
+    Ingestion NEVER runs in the Agent process: only a scoped job get-or-create
+    + build claim + Celery enqueue happen here (enqueue failures in eager
+    test environments never break the membership result).
+    """
+    from api.ingestion_service import IngestionService
+    from api.models import PaperIngestionJob, ProjectPaper, ResearchProject
+    from papers.models import upsert_paper
+    from rag.models import PaperIndexVersion
+
+    def _add() -> dict:
         project = ResearchProject.objects.get(id=project_id)
         added: list[dict] = []
+        queued: list[dict] = []
+        reused: list[dict] = []
+        deferred: list[dict] = []
+        upload_required: list[dict] = []
+        service = IngestionService()
         for payload in papers:
             paper = upsert_paper(payload)
             link, created = ProjectPaper.objects.get_or_create(
@@ -313,11 +337,112 @@ async def add_papers_to_project(project_id: int, papers: list[dict], reason: str
             if not created and reason:
                 link.source_reason = reason
                 link.save(update_fields=["source_reason", "updated_at"])
-            added.append({"paper_id": paper.id, "title": paper.title, "created": created})
-        return added
+            entry = {"paper_id": paper.id, "title": paper.title,
+                     "created": created}
+            added.append(entry)
 
-    added = await sync_to_async(_add)()
-    return {"added": added, "count": len(added)}
+            pdf_url = str(payload.get("pdf_url") or paper.pdf_url or "").strip()
+            if not pdf_url:
+                upload_required.append({**entry, "reason": "missing_url"})
+                continue
+            if not _is_https_candidate_url(pdf_url):
+                # Tasks5-CX-06: only HTTPS candidate URLs (no userinfo) may be
+                # auto-queued; anything else needs a safe source and is never
+                # enqueued or turned into a job.
+                upload_required.append({**entry, "reason": "unsafe_url"})
+                continue
+            if PaperIndexVersion.objects.filter(
+                    paper=paper, status="active").exists() or \
+               PaperIngestionJob.objects.filter(
+                    paper=paper, status="embedded").exists():
+                reused.append({**entry, "reason": "already_indexed"})
+                continue
+            if len(queued) >= 3:
+                deferred.append({**entry, "reason": "queue_limit"})
+                continue
+            # scoped job get-or-create + global build claim + Celery enqueue;
+            # the file_name is a SAFE digest name — never derived from the
+            # raw URL path (Tasks5-CX-07)
+            try:
+                job, _job_created = service.get_or_create_job(
+                    project, paper,
+                    idempotency_key=service.request_key(
+                        project.id, paper.id, _digest_source(pdf_url)),
+                    source_kind="agent",
+                    source_url=pdf_url,
+                    file_name=f"paper-{paper.id}-{_digest_source(pdf_url)[:8]}.pdf",
+                )
+                service.claim_build(job, _digest_source(pdf_url))
+                from api.tasks import ingest_paper_pdf_task
+
+                try:
+                    ingest_paper_pdf_task.delay(job.id)
+                except Exception:
+                    # eager environments / unavailable worker must not break
+                    # the membership result; the job stays pending for the
+                    # worker or a later retry
+                    pass
+                queued.append({**entry, "ingestion_job_id": job.id})
+                _publish_ingestion_event(project_id, "ingestion_agent_queued", {
+                    "job_id": job.id, "paper_id": paper.id, "reason": "auto",
+                })
+            except Exception as exc:
+                logger.warning(
+                    "add_papers_to_project enqueue skipped",
+                    extra={
+                        "event": "agent_add_enqueue_skipped",
+                        "project_id": project.id,
+                        "paper_id": paper.id,
+                        "error": exc.__class__.__name__,
+                        "status": "skipped",
+                    },
+                )
+                deferred.append(entry)
+        return {
+            "added": added,
+            "count": len(added),
+            "queued": queued,
+            "reused": reused,
+            "deferred": deferred,
+            "upload_required": upload_required,
+        }
+
+    return await sync_to_async(_add)()
+
+
+def _is_https_candidate_url(url: str) -> bool:
+    """Tasks5-CX-06: HTTPS-only, no userinfo — the ONLY URLs eligible for
+    auto-queueing. Never logs the URL itself."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and bool(parsed.hostname)
+    )
+
+
+def _publish_ingestion_event(
+    project_id: int, event_type: str, payload: dict
+) -> None:
+    """Tasks 5.4: agent auto-queue summaries flow through the SAME
+    EventPublisher sanitize boundary (schema allowlist; never persisted —
+    the agent process has no run)."""
+    from agent.event_publisher import EventPublisher
+
+    EventPublisher(project_id=project_id, persist=False).publish(
+        event_type, payload)
+
+
+def _digest_source(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:64]
 
 
 async def list_project_papers(project_id: int) -> dict[str, Any]:

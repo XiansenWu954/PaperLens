@@ -8,6 +8,7 @@ const emit = defineEmits<{
   remove: [paperId: number]
   uploadPdf: [paperId: number, file: File]
   ingestPdf: [paperId: number]
+  retryJob: [paperId: number]
 }>()
 
 type FilterKey = 'all' | ProjectPaper['status'] | 'rag-ready' | 'needs-rag'
@@ -30,11 +31,32 @@ const statusDescriptions: Record<ProjectPaper['status'], string> = {
   excluded: '已排除，不参与 RAG/图谱',
 }
 
+// Tasks 5.5: full ingestion lifecycle — metadata-only and every intermediate
+// state are visually distinct; nothing is shown as full-text unless the
+// active index really has chunks (fulltext_ready).
 const ingestionLabels: Record<ProjectPaper['ingestion_status'], string> = {
   pending: '待入库',
+  downloading: '下载中',
   parsing: '解析中',
+  embedding: '向量化中',
+  committing: '提交中',
   embedded: '已入库',
   failed: '入库失败',
+}
+
+// Tasks 5.5: while a job is active, duplicate upload/ingest commands are
+// disabled so the same paper is never triggered twice concurrently.
+const ACTIVE_INGESTION_STATES: ProjectPaper['ingestion_status'][] = [
+  'pending', 'downloading', 'parsing', 'embedding', 'committing',
+]
+
+function isActiveIngestion(paper: ProjectPaper): boolean {
+  return ACTIVE_INGESTION_STATES.includes(paper.ingestion_status)
+}
+
+function canRetry(paper: ProjectPaper): boolean {
+  // retry only for failed jobs that were not marked non-retryable
+  return paper.ingestion_status === 'failed' && paper.latest_job_retryable !== false
 }
 
 const stats = computed(() => {
@@ -196,12 +218,21 @@ function uploadPdf(paperId: number, event: Event) {
           </span>
           <span
             :class="{
-              warn: paper.ingestion_status === 'pending' || paper.ingestion_status === 'parsing',
-              good: paper.ingestion_status === 'embedded' && paper.chunk_count > 0,
+              warn: isActiveIngestion(paper),
+              good: paper.fulltext_ready,
               bad: paper.ingestion_status === 'failed',
             }"
           >
-            {{ ingestionLabels[paper.ingestion_status] }} · {{ paper.chunk_count }} chunks
+            <template v-if="paper.fulltext_ready">全文已就绪</template>
+            <template v-else-if="paper.ingestion_status === 'failed'">
+              {{ ingestionLabels[paper.ingestion_status] }} · {{ paper.chunk_count }} chunks
+            </template>
+            <template v-else-if="!paper.pdf_url">
+              待上传 PDF · {{ ingestionLabels[paper.ingestion_status] }}
+            </template>
+            <template v-else>
+              {{ ingestionLabels[paper.ingestion_status] }} · {{ paper.chunk_count }} chunks
+            </template>
           </span>
           <span v-if="paper.embedding_model">{{ paper.embedding_model }}</span>
           <span v-if="paper.indexed_at">indexed {{ new Date(paper.indexed_at).toLocaleDateString() }}</span>
@@ -216,7 +247,7 @@ function uploadPdf(paperId: number, event: Event) {
         <small>{{ statusDescriptions[paper.status] }}</small>
         <select
           :value="paper.status"
-          :disabled="loading"
+          :disabled="loading ? 'true' : undefined"
           :aria-label="`设置 ${paper.title} 的项目状态`"
           @change="emit('setStatus', paper.paper_id, ($event.target as HTMLSelectElement).value as ProjectPaper['status'])"
         >
@@ -225,17 +256,31 @@ function uploadPdf(paperId: number, event: Event) {
           <option value="core">核心</option>
           <option value="excluded">排除</option>
         </select>
-        <label class="secondary-button file-button" :class="{ disabled: loading }">
-          <input type="file" accept="application/pdf,.pdf" :disabled="loading" @change="uploadPdf(paper.paper_id, $event)" />
+        <label class="secondary-button file-button" :class="{ disabled: loading || isActiveIngestion(paper) }">
+          <input
+            type="file"
+            accept="application/pdf,.pdf"
+            :disabled="(loading || isActiveIngestion(paper)) ? 'true' : undefined"
+            @change="uploadPdf(paper.paper_id, $event)"
+          />
           上传 PDF
         </label>
         <button
           type="button"
           class="secondary-button"
-          :disabled="loading || !paper.pdf_url"
+          :disabled="(loading || isActiveIngestion(paper) || !paper.pdf_url) ? 'true' : undefined"
           @click="emit('ingestPdf', paper.paper_id)"
         >
           从链接入库
+        </button>
+        <button
+          v-if="canRetry(paper)"
+          type="button"
+          class="secondary-button"
+          :disabled="loading ? 'true' : undefined"
+          @click="emit('retryJob', paper.paper_id)"
+        >
+          重试
         </button>
         <p v-if="paper.ingestion_status === 'failed'" class="ingest-error">
           入库失败{{ paper.latest_ingestion_error ? `：${paper.latest_ingestion_error}` : '' }}，可重新上传或从链接重试。
@@ -244,7 +289,7 @@ function uploadPdf(paperId: number, event: Event) {
           <button type="button" class="secondary-button" @click="cancelRemove">取消</button>
           <button type="button" class="danger-button" @click="confirmRemove(paper.paper_id)">确认移出</button>
         </template>
-        <button v-else type="button" class="ghost-button" :disabled="loading" @click="requestRemove(paper.paper_id)">移出项目</button>
+        <button v-else type="button" class="ghost-button" :disabled="loading ? 'true' : undefined" @click="requestRemove(paper.paper_id)">移出项目</button>
       </div>
     </article>
   </section>

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import os
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from rest_framework.response import Response
 from agent.harness import ProjectAgentHarness
 from agent.project_tools import add_papers_to_project, execute_project_tool
 from papers.models import Paper, upsert_paper
+from rag.acquisition import PdfAcquisitionError
 from realtime.sse import _sse
 
 from .demo import seed_demo_project
@@ -37,6 +39,29 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Tasks 3.2: hard ceiling for streamed PDF uploads (50 MiB, boundary inclusive)
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _cleanup_upload_artifacts(
+    part_path: Path, target_path: Path | None, *, remove_target: bool = False
+) -> None:
+    """Remove partial artifacts of a failed upload (Tasks 3.2 / ING-C-CX-04).
+
+    Only the .part temp file is removed by default. ``target_path`` is
+    content-addressed and may pre-exist this request, so it is removed ONLY
+    when ``remove_target=True`` — i.e. the caller PROVED the target did not
+    exist before this request (any bytes there can only be this request's
+    partial output). Pre-existing artifacts are never deleted.
+    """
+    for candidate in (part_path, target_path if remove_target else None):
+        if candidate is None:
+            continue
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @api_view(["POST"])
@@ -173,6 +198,18 @@ def _enqueue_ingestion_job(job: PaperIngestionJob):
         PaperIngestionJob.objects.filter(id=job.id).update(celery_task_id=result.id)
         job.celery_task_id = result.id
     return result
+
+
+def _publish_ingestion_event(
+    project_id: int, event_type: str, payload: dict
+) -> None:
+    """Tasks 5.4: view-layer ingestion events flow through the SAME
+    EventPublisher sanitize boundary (schema allowlist + correlation ids);
+    they are not persisted (no run) but are schema-validated."""
+    from agent.event_publisher import EventPublisher
+
+    EventPublisher(project_id=project_id, persist=False).publish(
+        event_type, payload)
 
 
 @api_view(["GET", "POST"])
@@ -314,38 +351,153 @@ def project_paper_pdf_upload(request, project_id: int, paper_id: int):
         return Response({"error": "PDF 文件为空"}, status=status.HTTP_400_BAD_REQUEST)
 
     original_name = Path(uploaded.name).name or f"paper-{paper_id}.pdf"
-    data = uploaded.read()
-    file_hash = hashlib.sha256(data).hexdigest()
     target_dir = Path(settings.MEDIA_ROOT) / "papers" / str(paper_id)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{file_hash}.pdf"
-    target_path.write_bytes(data)
 
-    job = PaperIngestionJob.objects.create(
-        project=link.project,
-        paper=link.paper,
-        status="pending",
+    # Tasks 3.2/ING-C-CX-02/04: stream the upload via chunks() into a .part
+    # temp file with a hard size cap; the committed file is content-addressed
+    # and promoted by an ATOMIC same-directory replace — the payload is never
+    # read back into memory (no Path.read_bytes). Identical hash already
+    # present stays idempotent (replace overwrites the identical content).
+    # Cleanup removes the .part always, and the target ONLY when the target
+    # did not exist before this request (so pre-existing content-addressed
+    # artifacts are never deleted).
+    part_path = target_dir / f".{time.time_ns()}-{paper_id}.part"
+    target_path: Path | None = None
+    target_existed = False
+    written = 0
+    hasher = hashlib.sha256()
+    try:
+        with open(part_path, "wb") as fh:
+            for chunk in uploaded.chunks():
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise PdfAcquisitionError("size_limit_exceeded")
+                hasher.update(chunk)
+                fh.write(chunk)
+        if written == 0:
+            raise PdfAcquisitionError("invalid_pdf_magic")
+        with open(part_path, "rb") as fh:
+            head = fh.read(len(b"%PDF-"))
+        if not head.startswith(b"%PDF-"):
+            raise PdfAcquisitionError("invalid_pdf_magic")
+
+        file_hash = hasher.hexdigest()
+        target_path = target_dir / f"{file_hash}.pdf"
+        target_existed = target_path.exists()
+        os.replace(part_path, target_path)
+    except PdfAcquisitionError as exc:
+        _cleanup_upload_artifacts(part_path, target_path)
+        logger.info(
+            "project paper PDF upload rejected",
+            extra={
+                "event": "ingestion_upload_rejected",
+                "project_id": project_id,
+                "paper_id": paper_id,
+                "error_code": exc.error_code,
+                "status": "rejected",
+            },
+        )
+        return Response({"error": exc.error_code}, status=status.HTTP_400_BAD_REQUEST)
+    except OSError:
+        # ING-C-CX-04: os.replace is atomic — a pre-existing content-addressed
+        # target is untouched and MUST survive; a target that did not exist
+        # before this request can only be this request's partial output and is
+        # removed together with the .part.
+        _cleanup_upload_artifacts(
+            part_path, target_path, remove_target=not target_existed)
+        logger.error(
+            "project paper PDF upload storage failed",
+            extra={
+                "event": "ingestion_upload_storage_failed",
+                "project_id": project_id,
+                "paper_id": paper_id,
+                "status": "error",
+            },
+        )
+        return Response({"error": "storage_failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Tasks 4.1: scoped job get-or-create on the request key (concurrent
+    # identical uploads converge on ONE job) + global build claim (cross-
+    # project identical PDFs share ONE non-null index version).
+    from .ingestion_service import IngestionService
+
+    service = IngestionService()
+    idempotency_key = service.request_key(project_id, paper_id, file_hash)
+    job, created = service.get_or_create_job(
+        link.project,
+        link.paper,
+        idempotency_key=idempotency_key,
         file_name=original_name,
         file_hash=file_hash,
         file_path=str(target_path),
+        source_kind="upload",
+        file_size=written,
     )
-    async_result = _enqueue_ingestion_job(job)
-    job.refresh_from_db()
-    logger.info(
-        "project paper PDF upload queued",
-        extra={
-            "event": "ingestion_upload_queued",
-            "project_id": project_id,
-            "paper_id": paper_id,
-            "ingestion_job_id": job.id,
-            "file_size": len(data),
-            "file_hash": file_hash,
-            "status": 201,
-        },
-    )
+    service.claim_build(job, file_hash)
+    if job.index_version_id and job.index_version.status == "active":
+        # ING-D-CX-01: the global build for this paper+source is ALREADY
+        # active — reuse it: the job goes straight to the embedded/reused
+        # terminal state with the active chunk_count; nothing is parsed,
+        # embedded, written, deleted or enqueued again.
+        job.status = "embedded"
+        job.chunk_count = job.index_version.chunk_count
+        job.save(update_fields=["status", "chunk_count", "updated_at"])
+        created = False
+        logger.info(
+            "project paper PDF upload reused active build",
+            extra={
+                "event": "ingestion_upload_reused_active_build",
+                "project_id": project_id,
+                "paper_id": paper_id,
+                "ingestion_job_id": job.id,
+                "index_version_id": job.index_version_id,
+                "status": 201,
+            },
+        )
+    if created:
+        async_result = _enqueue_ingestion_job(job)
+        job.refresh_from_db()
+        celery_task_id = async_result.id or job.celery_task_id
+        logger.info(
+            "project paper PDF upload queued",
+            extra={
+                "event": "ingestion_upload_queued",
+                "project_id": project_id,
+                "paper_id": paper_id,
+                "ingestion_job_id": job.id,
+                "file_size": written,
+                "file_hash": file_hash,
+                "status": 201,
+            },
+        )
+    else:
+        celery_task_id = job.celery_task_id
+        logger.info(
+            "project paper PDF upload reused existing job",
+            extra={
+                "event": "ingestion_upload_reused",
+                "project_id": project_id,
+                "paper_id": paper_id,
+                "ingestion_job_id": job.id,
+                "status": 200,
+            },
+        )
     payload = PaperIngestionJobSerializer(job).data
-    payload["celery_task_id"] = async_result.id or job.celery_task_id
-    return Response(payload, status=status.HTTP_201_CREATED)
+    payload["celery_task_id"] = celery_task_id
+    _publish_ingestion_event(project_id, "ingestion_upload_queued", {
+        "job_id": job.id, "paper_id": paper_id,
+        "deduplicated": not created,
+        "reused": job.status == "embedded",
+        "fulltext_ready": payload.get("fulltext_ready"),
+    })
+    # Tasks 5.1: 201 on creation, 200 + deduplicated=true when the request
+    # converged on an existing job — the caller can tell a NEW build from a
+    # reused one without treating reuse as a fresh success.
+    if created:
+        return Response(payload, status=status.HTTP_201_CREATED)
+    payload["deduplicated"] = True
+    return Response(payload, status=status.HTTP_200_OK)
 
 
 @api_view(["POST"])
@@ -356,15 +508,42 @@ def project_paper_ingest(request, project_id: int, paper_id: int):
     source_url = (request.data.get("pdf_url") or link.paper.pdf_url or "").strip()
     if not source_url:
         return Response({"error": "论文没有可入库的 pdf_url"}, status=status.HTTP_400_BAD_REQUEST)
-    job = PaperIngestionJob.objects.create(
-        project=link.project,
-        paper=link.paper,
-        status="pending",
-        file_name=Path(source_url.split("?")[0]).name[:255],
+
+    # Tasks5-CX-01: URL ingest goes through IngestionService like upload —
+    # scoped request key, job get-or-create, global build claim. Source
+    # identity in keys/logs is a DIGEST, never the raw URL. The actual safe
+    # download stays in the worker (SafePdfFetcher).
+    import hashlib
+
+    from .ingestion_service import IngestionService
+
+    digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:64]
+    service = IngestionService()
+    job, created = service.get_or_create_job(
+        link.project,
+        link.paper,
+        idempotency_key=service.request_key(project_id, paper_id, digest),
+        source_kind="url",
         source_url=source_url,
+        file_name=f"paper-{paper_id}-{digest[:8]}.pdf",
     )
-    _enqueue_ingestion_job(job)
-    job.refresh_from_db()
+    # source identity for the GLOBAL build is the raw URL — claim_build digests
+    # it internally, exactly like the worker does (Tasks5-CX-01)
+    version = service.claim_build(job, source_url)
+    if version.status == "active":
+        # Tasks5-CX-01: reuse the active global build — no enqueue/parse/write
+        job.status = "embedded"
+        job.chunk_count = version.chunk_count
+        job.save(update_fields=["status", "chunk_count", "updated_at"])
+        created = False
+    if created:
+        try:
+            _enqueue_ingestion_job(job)
+        except Exception:
+            # eager environments may run the task synchronously; the job state
+            # reflects the outcome — the response stays a queue acceptance
+            pass
+        job.refresh_from_db()
     logger.info(
         "project paper URL ingestion queued",
         extra={
@@ -372,11 +551,22 @@ def project_paper_ingest(request, project_id: int, paper_id: int):
             "project_id": project_id,
             "paper_id": paper_id,
             "ingestion_job_id": job.id,
-            "source_host": source_url.split("/")[2] if "://" in source_url else "",
-            "status": 201,
+            "source_hash": digest,
+            "status": 201 if created else 200,
         },
     )
-    return Response(PaperIngestionJobSerializer(job).data, status=status.HTTP_201_CREATED)
+    payload = PaperIngestionJobSerializer(job).data
+    _publish_ingestion_event(project_id, "ingestion_url_queued", {
+        "job_id": job.id, "paper_id": paper_id,
+        "source_hash": digest,
+        "deduplicated": not created,
+        "reused": job.status == "embedded",
+        "fulltext_ready": payload.get("fulltext_ready"),
+    })
+    if created:
+        return Response(payload, status=status.HTTP_201_CREATED)
+    payload["deduplicated"] = True
+    return Response(payload, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
@@ -385,6 +575,58 @@ def project_ingestion_jobs(request, project_id: int):
         return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
     jobs = PaperIngestionJob.objects.select_related("paper").filter(project_id=project_id)
     return Response(PaperIngestionJobSerializer(jobs, many=True).data)
+
+
+@api_view(["POST"])
+def project_ingestion_job_retry(request, project_id: int, job_id: int):
+    """Tasks 5.1 / Tasks5-CX-04: scoped retry of a FAILED + RETRYABLE job.
+
+    Only own failed jobs with retryable=true are re-queued (202). Own failed
+    but non-retryable jobs, foreign jobs, non-failed jobs and nonexistent ids
+    share ONE uniform safe rejection shape (404) — indistinguishable
+    not-found semantics. Retry never flips a non-retryable job. If the queue
+    is unavailable the job stays in an explicit pending state and a stable
+    enqueue_failed error is returned instead of pretending success."""
+    job = PaperIngestionJob.objects.filter(
+        id=job_id, project_id=project_id).first()
+    if job is None or job.status != "failed" or not job.retryable:
+        return Response({"error": "job_not_found"}, status=status.HTTP_404_NOT_FOUND)
+    job.status = "pending"
+    job.error_message = ""
+    job.error_code = ""
+    job.save(update_fields=["status", "error_message", "error_code",
+                            "updated_at"])
+    try:
+        _enqueue_ingestion_job(job)
+    except Exception:
+        job.refresh_from_db()
+        if job.status == "failed":
+            # an eager run executed the task and failed the job itself — the
+            # ACCEPT reflects the queue transition; the job carries the state
+            return Response(PaperIngestionJobSerializer(job).data,
+                            status=status.HTTP_202_ACCEPTED)
+        # real enqueue failure (broker unavailable): stable safe rejection,
+        # job stays pending for a later retry
+        return Response({"error": "enqueue_failed"},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    job.refresh_from_db()
+    _publish_ingestion_event(project_id, "ingestion_job_retried", {
+        "job_id": job.id, "paper_id": job.paper_id,
+        "retryable": job.retryable,
+        "fulltext_ready": PaperIngestionJobSerializer(job).data.get("fulltext_ready"),
+    })
+    logger.info(
+        "project paper ingestion job retried",
+        extra={
+            "event": "ingestion_job_retried",
+            "project_id": project_id,
+            "paper_id": job.paper_id,
+            "ingestion_job_id": job.id,
+            "status": 202,
+        },
+    )
+    return Response(PaperIngestionJobSerializer(job).data,
+                    status=status.HTTP_202_ACCEPTED)
 
 
 @api_view(["POST"])

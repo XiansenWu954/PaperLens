@@ -67,6 +67,10 @@ export interface ResearchProject {
   updated_at: string
 }
 
+export type IngestionStatus =
+  | 'pending' | 'downloading' | 'parsing' | 'embedding'
+  | 'committing' | 'embedded' | 'failed'
+
 export interface ProjectPaper {
   id: number
   paper_id: number
@@ -81,14 +85,16 @@ export interface ProjectPaper {
   pdf_url: string | null
   status: 'candidate' | 'included' | 'core' | 'excluded'
   source_reason: string
-  added_by: 'user' | 'agent' | 'demo'
+  added_by: string
   notes: string
-  ingestion_status: 'pending' | 'parsing' | 'embedded' | 'failed'
+  ingestion_status: IngestionStatus
   latest_ingestion_job_id: number | null
   latest_ingestion_error: string
   embedding_model: string
   indexed_at: string | null
   chunk_count: number
+  fulltext_ready: boolean
+  latest_job_retryable: boolean
   created_at: string
   updated_at: string
 }
@@ -99,11 +105,14 @@ export interface PaperIngestionJob {
   paper: number
   paper_title: string
   status: 'pending' | 'parsing' | 'embedded' | 'failed'
+  source_kind: string
   file_name: string
   file_hash: string
-  source_url: string
   chunk_count: number
+  error_code: string
   error_message: string
+  retryable: boolean
+  fulltext_ready: boolean
   celery_task_id: string
   created_at: string
   updated_at: string
@@ -365,6 +374,13 @@ export async function ingestProjectPaperPdf(projectId: number, paperId: number, 
 export async function listProjectIngestionJobs(projectId: number): Promise<PaperIngestionJob[]> {
   const response = await fetch(`${API_BASE}/api/projects/${projectId}/ingestion-jobs`)
   return parseResponse(response, `查询入库任务失败: ${response.status}`)
+}
+
+export async function retryProjectIngestionJob(projectId: number, jobId: number): Promise<PaperIngestionJob> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ingestion-jobs/${jobId}/retry`, {
+    method: 'POST',
+  })
+  return parseResponse(response, `重试入库任务失败: ${response.status}`)
 }
 
 export async function listReports(projectId: number): Promise<ReportVersion[]> {

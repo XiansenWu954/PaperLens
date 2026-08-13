@@ -8,7 +8,7 @@ import {
   getProject,
   importProjectPapers,
   ingestProjectPaperPdf,
-  listProjectIngestionJobs,
+  listProjectIngestionJobs, retryProjectIngestionJob,
   listProjectPapers,
   listProjects,
   listProjectRuns,
@@ -125,6 +125,18 @@ export const useProjectsStore = defineStore('projects', () => {
     return job
   }
 
+  async function retryIngestionJob(projectId: number, paperId: number) {
+    // Tasks 5.5: retry the latest FAILED + retryable job of this paper
+    const jobs = await listProjectIngestionJobs(projectId)
+    const latest = jobs
+      .filter((j) => j.paper === paperId && j.status === 'failed' && j.retryable)
+      .sort((a, b) => b.id - a.id)[0]
+    if (!latest) throw new Error('没有可重试的入库任务')
+    await retryProjectIngestionJob(projectId, latest.id)
+    await refreshProjectArtifacts(projectId)
+    return latest
+  }
+
   async function saveReport(projectId: number, payload: { title: string; content: string; source?: string }) {
     const report = await createReport(projectId, payload)
     reports.value = [report, ...reports.value]
@@ -176,6 +188,7 @@ export const useProjectsStore = defineStore('projects', () => {
     loadIngestionJobs,
     uploadPdf,
     ingestFromPdfUrl,
+    retryIngestionJob,
     saveReport,
     startWorkflow,
     refreshProjectArtifacts,
