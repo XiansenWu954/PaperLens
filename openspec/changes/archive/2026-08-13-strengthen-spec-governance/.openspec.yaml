@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-12
+goal: Freeze PaperLens role ownership, specification traceability, drift
+  control, and contradiction resolution before further V3 implementation.
