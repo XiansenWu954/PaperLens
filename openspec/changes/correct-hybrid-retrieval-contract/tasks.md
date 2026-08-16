@@ -6,38 +6,43 @@
   `agent-harness-and-mcp`, including interfaces, compatibility, gates, Non-Goals and stop conditions.
 - [x] 1.3 Run `openspec validate --all --strict`, commit the OpenSpec-only baseline and record its SHA
   in the external handoff so the task file does not contain a self-referential commit identity.
-- [ ] 1.4 Give a clean GLM session the dataset-only preregistration handoff. Accept only a sealed
+- [x] 1.4 Give a clean GLM session the dataset-only preregistration handoff. Accept only a sealed
   held-out artifact hash, schema/count manifest and annotation-quality report; no production code.
-- [ ] 1.5 Give DS only the approved specs, dev/calibration assets and held-out hash. Production code
-  remains forbidden until 1.3 and 1.4 are complete.
+- [x] 1.5 Give DS only the approved specs, public exclusion manifest and held-out hash. Dev/calibration
+  assets remain a later DS evaluation task; sealed labels remain forbidden throughout implementation.
+
+Accepted preregistration: schema `gold-v2-heldout-2`, 48 cases, sealed SHA-256
+`a03088f5de32309469f313446da3ce26315b68c3b1e47829d546b9250e6fbe79`. Codex independently
+re-ran the read-only offline, report-consistency and detached-manifest verifiers on 2026-08-17;
+all returned PASS with zero file changes. Verdict: `PASS / NO DRIFT`.
 
 ## 2. GLM Preregistration — Sealed Held-out Dataset
 
-- [ ] 2.1 Use the frozen gold-v2 schema to select the held-out twelve-paper split across all six topics
+- [x] 2.1 Use the frozen gold-v2 schema to select the held-out twelve-paper split across all six topics
   without reading or changing production retrieval behavior.
-- [ ] 2.2 Create 48 held-out cases with the frozen category distribution, graded canonical chunk labels,
+- [x] 2.2 Create 48 held-out cases with the frozen category distribution, graded canonical chunk labels,
   compare per-paper obligations and hard-negative/scope controls.
-- [ ] 2.3 Validate every referenced PDF, active chunk hash, page/section and label; reject empty positives,
+- [x] 2.3 Validate every referenced PDF, active chunk hash, page/section and label; reject empty positives,
   duplicate cases, split overlap and labels that resolve only by metadata or stale versions.
-- [ ] 2.4 Store labels only under gitignored
+- [x] 2.4 Store labels only under gitignored
   `docs/internal/phase3-hybrid-retrieval/held-out-preregistration/`; publish to
   Codex a SHA-256, paper/case/category counts and schema version without revealing labels to DS.
-- [ ] 2.5 Submit exactly four sections (`已实现`, `原始证据`, `完整测试`, `仍未完成`) and stop. Tables may
+- [x] 2.5 Submit exactly four sections (`已实现`, `原始证据`, `完整测试`, `仍未完成`) and stop. Tables may
   only supplement the prose case matrix.
 
 ### Codex Preregistration Review Ledger
 
-- [ ] P3-PREREG-CX-01: Correct the stale-trap exclusion entry so the active source and superseded
+- [x] P3-PREREG-CX-01: Correct the stale-trap exclusion entry so the active source and superseded
   source each bind to their actual PDF SHA-256 while the manifest still contains exactly fourteen
   distinct paper identities.
-- [ ] P3-PREREG-CX-02: Recompute paper-split overlap from the final twelve held-out plus two trap
+- [x] P3-PREREG-CX-02: Recompute paper-split overlap from the final twelve held-out plus two trap
   identities, preserve a sealed legacy/smoke universe snapshot or digest evidence, and remove the
   obsolete pre-replacement candidate list as the source of the PASS claim.
-- [ ] P3-PREREG-CX-03: Make the sealed verifier truly read-only and extend runtime/offline checks to
+- [x] P3-PREREG-CX-03: Make the sealed verifier truly read-only and extend runtime/offline checks to
   bind accepted PDF bytes, canonical content hashes, page-or-section anchors, active/superseded
   versions and parser/chunker identity. Record real BGE-M3 dense facts and the expected pre-fix empty
   sparse baseline separately; non-empty sparse weights become a Batch B and fixed-revision gate.
-- [ ] P3-PREREG-CX-04: Generate a final detached artifact manifest after verifier and mutation output,
+- [x] P3-PREREG-CX-04: Generate a final detached artifact manifest after verifier and mutation output,
   report mutations separately from the read-only proof, and require all summary claims to recompute
   from the sealed artifacts without trusting stored PASS fields.
 - [x] P3-SPEC-CX-01: Promote the discovered real-provider document sparse wiring gap into the Phase 3
