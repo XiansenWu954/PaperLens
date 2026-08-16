@@ -342,8 +342,13 @@ async def ingest_pdf_bytes(
     skip_existing: bool = True,
     replace_existing: bool = False,
     index_version=None,
+    execution: tuple[int, str] | None = None,
 ) -> int:
-    """Parse PDF bytes, chunk text, embed chunks, and persist Text rows."""
+    """Parse PDF bytes, chunk text, embed chunks, and persist Text rows.
+
+    P2-GLM-01: ``execution`` (job_id, token) fences the chunk persistence
+    transaction (see ingest_text).
+    """
 
     if skip_existing:
         existing = await sync_to_async(lambda: paper.chunks.count())()
@@ -362,7 +367,8 @@ async def ingest_pdf_bytes(
     full_text, pages = await sync_to_async(parse_pdf_pages)(pdf_bytes)
     return await ingest_text(
         paper, full_text, pages=pages,
-        replace_existing=replace_existing, index_version=index_version)
+        replace_existing=replace_existing, index_version=index_version,
+        execution=execution)
 
 
 async def ingest_text(
@@ -372,6 +378,7 @@ async def ingest_text(
     pages: list[PageText] | None = None,
     replace_existing: bool = False,
     index_version=None,
+    execution: tuple[int, str] | None = None,
 ) -> int:
     """Chunk extracted paper text, embed it, and save RAG Text rows.
 
@@ -380,6 +387,10 @@ async def ingest_text(
     a violation returns 0 and persists NOTHING. ``index_version`` is the
     claimed build version (Tasks 4.1) or None to use the compatibility
     building version.
+
+    P2-GLM-01 fencing: with ``execution`` (job_id, token) the chunk
+    persistence transaction FIRST locks and verifies the execution lease;
+    a stale worker raises ExecutionLeaseLost and persists nothing.
     """
 
     if len(full_text) < 200:
@@ -426,47 +437,58 @@ async def ingest_text(
         # BUILDING version (claimed build or the dedicated compatibility
         # building version). An active/superseded/failed version is NEVER
         # rewritten — fail closed and persist nothing.
-        version = index_version or _ensure_building_version(paper)
-        if not PaperIndexVersion.objects.filter(
-                id=version.id, status="building").exists():
-            logger.warning(
-                "refusing to write into a non-building index version",
-                extra={
-                    "event": "ingest_refused_non_building_version",
-                    "paper_id": paper.id,
-                    "index_version_id": version.id,
-                    "status": "rejected",
-                },
-            )
-            return 0
-        if replace_existing:
-            Text.objects.filter(index_version=version).delete()
-        objs = [
-            Text(
-                paper=paper,
-                index_version=version,
-                docname=f"{docname_prefix} chunk{i}",
-                chunk_index=i,
-                content=chunk.content,
-                embedding=vec.tolist(),
-                embedding_model=str(meta["embedding_model"]),
-                embedding_dim=int(meta["embedding_dim"]),
-                embedding_version=str(meta["embedding_version"]),
-                content_hash=_content_hash(chunk.content),
-                page_start=chunk.page_start,
-                page_end=chunk.page_end,
-                section=chunk.section,
-                char_start=chunk.char_start,
-                char_end=chunk.char_end,
-                search_vector=_search_document(chunk.content, paper),
-                sparse_weights=sparse_list[i] if i < len(sparse_list) else {},
-                citation_key=citation_key,
-                indexed_at=indexed_at,
-            )
-            for i, (chunk, vec) in enumerate(zip(chunks, vectors))
-        ]
-        Text.objects.bulk_create(objs)
-        return len(objs)
+        #
+        # P2-GLM-01: the whole write set (replace/delete + bulk_create +
+        # any compatibility version creation) runs inside ONE transaction
+        # whose first action is the execution-lease fence under a row lock
+        # — a stale worker persists zero chunks.
+        from django.db import transaction
+
+        with transaction.atomic():
+            if execution is not None:
+                from api.ingestion_execution import assert_execution_owner
+                assert_execution_owner(*execution)
+            version = index_version or _ensure_building_version(paper)
+            if not PaperIndexVersion.objects.filter(
+                    id=version.id, status="building").exists():
+                logger.warning(
+                    "refusing to write into a non-building index version",
+                    extra={
+                        "event": "ingest_refused_non_building_version",
+                        "paper_id": paper.id,
+                        "index_version_id": version.id,
+                        "status": "rejected",
+                    },
+                )
+                return 0
+            if replace_existing:
+                Text.objects.filter(index_version=version).delete()
+            objs = [
+                Text(
+                    paper=paper,
+                    index_version=version,
+                    docname=f"{docname_prefix} chunk{i}",
+                    chunk_index=i,
+                    content=chunk.content,
+                    embedding=vec.tolist(),
+                    embedding_model=str(meta["embedding_model"]),
+                    embedding_dim=int(meta["embedding_dim"]),
+                    embedding_version=str(meta["embedding_version"]),
+                    content_hash=_content_hash(chunk.content),
+                    page_start=chunk.page_start,
+                    page_end=chunk.page_end,
+                    section=chunk.section,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    search_vector=_search_document(chunk.content, paper),
+                    sparse_weights=sparse_list[i] if i < len(sparse_list) else {},
+                    citation_key=citation_key,
+                    indexed_at=indexed_at,
+                )
+                for i, (chunk, vec) in enumerate(zip(chunks, vectors))
+            ]
+            Text.objects.bulk_create(objs)
+            return len(objs)
 
     count = await sync_to_async(_save)()
     logger.info(

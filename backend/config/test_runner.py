@@ -148,8 +148,51 @@ class GuardedTestRunner(DiscoverRunner):
         else:
             logger.info("PAPERLENS_TEST_NETWORK=1: network guard DISABLED (live/integration suite).")
 
+    def setup_databases(self, **kwargs):
+        # Mirror production startup ordering (migrate -> checkpoint setup):
+        # create LangGraph checkpoint tables in the freshly built test
+        # database so checkpointed-workflow tests run against real tables.
+        result = super().setup_databases(**kwargs)
+        try:
+            from django.db import connection
+            from django.conf import settings
+
+            if connection.vendor == "postgresql" and getattr(
+                    settings, "PAPERLENS_DURABLE_WORKFLOW_ENABLED", False):
+                import asyncio
+                import psycopg
+                from langgraph.checkpoint.postgres.aio import (
+                    AsyncPostgresSaver)
+
+                db = connection.settings_dict
+
+                async def _setup():
+                    conn = await psycopg.AsyncConnection.connect(
+                        host=db.get("HOST") or "localhost",
+                        port=int(db.get("PORT") or 5432),
+                        dbname=db.get("NAME") or "",
+                        user=db.get("USER") or "",
+                        password=db.get("PASSWORD") or "",
+                        autocommit=True,
+                    )
+                    try:
+                        await AsyncPostgresSaver(conn).setup()
+                    finally:
+                        await conn.close()
+
+                asyncio.run(_setup())
+                logger.info("Test database checkpoint tables created.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "test checkpoint setup failed",
+                extra={"event": "test_checkpoint_setup_failed",
+                       "error": exc.__class__.__name__})
+        return result
+
     def teardown_databases(self, old_config, **kwargs):
         # §10 gate: release asgiref worker-thread DB sessions BEFORE the runner
         # drops the test databases.
         drain_asgiref_db_sessions()
+        from agent.project_workflow import close_checkpointer
+        close_checkpointer()
         return super().teardown_databases(old_config, **kwargs)

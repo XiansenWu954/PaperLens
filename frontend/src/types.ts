@@ -1,6 +1,6 @@
 /** PaperLens frontend contracts. */
 
-export type ResearchStatus = 'pending' | 'running' | 'done' | 'error'
+export type ResearchStatus = 'pending' | 'running' | 'waiting_ingestion' | 'done' | 'partial' | 'error'
 export type ClientStatus = ResearchStatus | 'idle'
 export type SseStatus = 'idle' | 'connecting' | 'open' | 'retrying' | 'closed' | 'error'
 
@@ -151,6 +151,15 @@ export interface ProjectRunEvent {
   created_at: string
 }
 
+export interface DependencySummary {
+  ready: number
+  pending: number
+  succeeded: number
+  failed: number
+  unavailable: number
+  total: number
+}
+
 export interface ProjectRun {
   id: number
   project: number
@@ -164,6 +173,10 @@ export interface ProjectRun {
   events: ProjectRunEvent[]
   created_at: string
   updated_at: string
+  workflow_phase?: string
+  resume_count?: number
+  dependency_summary?: DependencySummary
+  report_id?: number | null
 }
 
 export interface ChatRunResult {

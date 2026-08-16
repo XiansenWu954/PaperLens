@@ -1,16 +1,4 @@
-# Spec: project-workspace
-
-## Purpose
-
-Define persistent research projects, runs, events, chat sessions, reports, and
-dashboard APIs that organize PaperLens work.
-## Requirements
-### Requirement: Project workspace
-PaperLens MUST persist research work inside `ResearchProject` records.
-
-#### Scenario: Create project
-- **WHEN** POST `/api/projects` with title and optional description
-- **THEN** a project is created and returned.
+## MODIFIED Requirements
 
 ### Requirement: Project runs
 

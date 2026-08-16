@@ -63,12 +63,21 @@ class ProjectPaper(models.Model):
 
 
 class ProjectRun(models.Model):
-    """Inspectable project-scoped run used by Agent harnesses."""
+    """Inspectable project-scoped run used by Agent harnesses.
 
-    STATUS_CHOICES = ResearchTask_STATUS_CHOICES = [
+    Phase 2 Batch B adds durable workflow lifecycle fields, owner lease,
+    private draft state and strict timing timestamps. These fields are
+    additive — legacy runs remain compatible with the existing 4-state
+    machine; the new statuses (waiting_ingestion, partial) are only used
+    by durable workflow runs.
+    """
+
+    STATUS_CHOICES = [
         ("pending", "Pending"),
         ("running", "Running"),
+        ("waiting_ingestion", "Waiting Ingestion"),
         ("done", "Done"),
+        ("partial", "Partial"),
         ("error", "Error"),
     ]
 
@@ -85,7 +94,7 @@ class ProjectRun(models.Model):
         ResearchProject, related_name="runs", on_delete=models.CASCADE
     )
     kind = models.CharField(max_length=16, choices=KIND_CHOICES, default="research")
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     question = models.TextField(blank=True)
     output = models.TextField(blank=True)
     error_message = models.TextField(blank=True)
@@ -94,20 +103,49 @@ class ProjectRun(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ── Phase 2 Batch B: durable workflow lifecycle ───────────────────
+    workflow_phase = models.CharField(max_length=32, blank=True, default="")
+    resume_count = models.IntegerField(default=0)
+    owner_token = models.CharField(max_length=128, blank=True, default="")
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    first_rag_at = models.DateTimeField(null=True, blank=True)
+    last_ingestion_terminal_at = models.DateTimeField(null=True, blank=True)
+    # lifecycle timestamps (P2-B-CX-01): recorded when the corresponding
+    # transition occurs; legacy rows remain null
+    started_at = models.DateTimeField(null=True, blank=True)
+    waiting_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    draft_output = models.TextField(blank=True, default="")
+    # draft_output is private workflow state — NEVER exposed in serializers,
+    # events, logs or API responses.
+
     def __str__(self) -> str:
         return f"ProjectRun({self.id}, project={self.project_id}, {self.kind})"
 
 
 class ProjectRunEvent(models.Model):
-    """Append-only run event for progress, tools, and errors."""
+    """Append-only run event for progress, tools, and errors.
+
+    Phase 2 Batch B adds nullable dedupe_key for workflow event
+    idempotency: a non-empty dedupe_key must be unique within its run,
+    preventing duplicate node/wait/resume events from repeated delivery.
+    """
 
     run = models.ForeignKey(ProjectRun, related_name="events", on_delete=models.CASCADE)
     event_type = models.CharField(max_length=64, db_index=True)
     payload = models.JSONField(default=dict, blank=True)
+    dedupe_key = models.CharField(max_length=128, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "dedupe_key"],
+                name="uniq_event_run_dedupe_key",
+                condition=~models.Q(dedupe_key=""),
+            ),
+        ]
 
 
 class ChatSession(models.Model):
@@ -145,7 +183,13 @@ class ChatMessage(models.Model):
 
 
 class ReportVersion(models.Model):
-    """Versioned report artifact for a project."""
+    """Versioned report artifact for a project.
+
+    Phase 2 Batch B adds nullable source_run one-to-one so that durable
+    workflow reports are owned by exactly one ProjectRun and duplicate
+    resume cannot create a second report. Legacy reports remain
+    source_run=None.
+    """
 
     project = models.ForeignKey(
         ResearchProject, related_name="reports", on_delete=models.CASCADE
@@ -153,6 +197,10 @@ class ReportVersion(models.Model):
     title = models.CharField(max_length=240, default="Research report")
     content = models.TextField()
     source = models.CharField(max_length=32, default="agent")
+    source_run = models.OneToOneField(
+        "ProjectRun", related_name="owned_report",
+        null=True, blank=True, on_delete=models.SET_NULL,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -248,6 +296,15 @@ class PaperIngestionJob(models.Model):
     chunk_count = models.IntegerField(default=0)
     error_message = models.TextField(blank=True)
     celery_task_id = models.CharField(max_length=255, blank=True)
+    # Phase 2 Batch B: exact terminal timestamp for strict
+    # first_rag_at > last_ingestion_terminal_at ordering proof.
+    terminal_at = models.DateTimeField(null=True, blank=True)
+    # P2-GLM-01: private ingestion execution identity (attempt fencing).
+    # Never serialized, published, logged or checkpointed; terminal
+    # transitions clear all three fields.
+    execution_token = models.CharField(max_length=128, blank=True, default="")
+    execution_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    execution_lease_expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -298,3 +355,60 @@ class ResearchTask(models.Model):
 
     def __str__(self) -> str:
         return f"ResearchTask({self.id}, {self.status}, {self.question[:40]})"
+
+
+class ProjectWorkflowDependency(models.Model):
+    """Phase 2: one row per (workflow run, paper) linking ingestion
+    readiness to the durable graph.
+
+    Statuses:
+      ready        — active compatible full-text existed when established
+      pending      — workflow created/reused a non-terminal ingestion job
+      succeeded    — linked job reached embedded with active full text
+      failed       — linked job reached failed
+      unavailable  — no safe ingestible URL and no active full text
+    """
+
+    STATUS_CHOICES = [
+        ("ready", "Ready"),
+        ("pending", "Pending"),
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("unavailable", "Unavailable"),
+    ]
+
+    run = models.ForeignKey(
+        ProjectRun, related_name="workflow_dependencies",
+        on_delete=models.CASCADE,
+    )
+    paper = models.ForeignKey(
+        "papers.Paper", related_name="workflow_dependencies",
+        on_delete=models.CASCADE,
+    )
+    ingestion_job = models.ForeignKey(
+        PaperIngestionJob, related_name="workflow_dependencies",
+        null=True, blank=True, on_delete=models.SET_NULL,
+    )
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default="pending")
+    terminal_at = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "paper"],
+                name="uniq_workflow_dep_run_paper",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["run", "status"],
+                         name="api_pwdep_run_status_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return (f"ProjectWorkflowDependency(run={self.run_id}, "
+                f"paper={self.paper_id}, {self.status})")

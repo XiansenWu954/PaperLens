@@ -182,6 +182,8 @@ class ProjectRunEventSerializer(serializers.ModelSerializer):
 
 class ProjectRunSerializer(serializers.ModelSerializer):
     events = ProjectRunEventSerializer(many=True, read_only=True)
+    dependency_summary = serializers.SerializerMethodField()
+    report_id = serializers.SerializerMethodField()
 
     class Meta:
         model = ProjectRun
@@ -196,10 +198,50 @@ class ProjectRunSerializer(serializers.ModelSerializer):
             "sources",
             "citation_graph",
             "events",
+            # P2-B-CX-03: additive safe lifecycle fields (read-only)
+            "workflow_phase",
+            "resume_count",
+            "started_at",
+            "waiting_at",
+            "last_ingestion_terminal_at",
+            "first_rag_at",
+            "completed_at",
+            "dependency_summary",
+            "report_id",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "events"]
+        read_only_fields = [
+            "id", "created_at", "updated_at", "events",
+            "workflow_phase", "resume_count",
+            "started_at", "waiting_at",
+            "last_ingestion_terminal_at", "first_rag_at", "completed_at",
+            "dependency_summary", "report_id",
+        ]
+        # owner_token, lease_expires_at, draft_output are NEVER exposed.
+
+    def get_dependency_summary(self, obj) -> dict:
+        """P2-B-CX-03: per-status counts only — no paper title, URL,
+        error body, or checkpoint data."""
+        from django.db.models import Count
+        from api.models import ProjectWorkflowDependency
+        counts = dict(
+            ProjectWorkflowDependency.objects.filter(run=obj)
+            .values_list("status")
+            .annotate(n=Count("id"))
+        )
+        return {
+            "ready": counts.get("ready", 0),
+            "pending": counts.get("pending", 0),
+            "succeeded": counts.get("succeeded", 0),
+            "failed": counts.get("failed", 0),
+            "unavailable": counts.get("unavailable", 0),
+            "total": sum(counts.values()),
+        }
+
+    def get_report_id(self, obj) -> int | None:
+        report = getattr(obj, "owned_report", None)
+        return report.id if report else None
 
 
 class ChatMessageSerializer(serializers.ModelSerializer):

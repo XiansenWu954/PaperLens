@@ -243,7 +243,7 @@ Recent local results:
 | Frontend Vitest suite | 64 tests passed |
 | Frontend ingestion red-spec suite | 8 tests passed |
 | Frontend production build | passed |
-| OpenSpec strict validation | 15/15 current specs passed |
+| OpenSpec strict validation | All current specs pass strict validation |
 
 These numbers are the reproducible Phase 1 baseline. They validate project
 scope, evidence identity, citation resolution, capability policy, event

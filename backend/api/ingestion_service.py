@@ -40,7 +40,51 @@ class IngestionService:
     PARSER_IDENTITY = "ingestion-service-v1"
     CHUNK_CONFIG_HASH = "ingestion-service-v1"
 
-    # -- identity derivation (Tasks 4.1) ------------------------------------
+    # -- identity derivation (Tasks 4.1 / P2-C-R3-02) -----------------------
+
+    def canonical_url_identity(self, source_url: str) -> str:
+        """THE canonical URL source identity (P2-C-R3-02): the sha256 digest
+        of the raw URL. Every entry point (URL API, Agent auto-queue,
+        durable workflow, worker) MUST derive request keys, safe file names
+        and global build claims from this single contract — never from a
+        re-hashed digest (that would mint duplicate build versions)."""
+        return _digest(source_url)
+
+    def url_request_key(self, project_id: int, paper_id: int,
+                        source_url: str) -> str:
+        return self.request_key(project_id, paper_id,
+                                self.canonical_url_identity(source_url))
+
+    def url_file_name(self, paper_id: int, source_url: str) -> str:
+        # SAFE digest name — never derived from the raw URL path/query.
+        identity = self.canonical_url_identity(source_url)
+        return f"paper-{paper_id}-{identity[:8]}.pdf"
+
+    def enqueue_url_job(
+        self, *, project, paper, source_url: str, source_kind: str,
+    ) -> tuple[PaperIngestionJob, bool, PaperIndexVersion]:
+        """Single canonical entry for URL-sourced ingestion (P2-C-R3-02).
+
+        Used by the URL API, Agent auto-queue and the durable workflow so
+        all three converge on ONE scoped project job and ONE global build:
+          - request key   = {project}:{paper}:{sha256(url)[:64]}
+          - safe filename = paper-{paper}-{sha8}.pdf
+          - build claim   = claim_build(job, RAW url) — claim_build digests
+            internally, exactly like the worker's
+            ``job.file_hash or job.source_url`` fallback for URL jobs and
+            the original Phase 1 URL API behaviour (compatibility: existing
+            Phase 1 builds are reused, never duplicated).
+        """
+        job, created = self.get_or_create_job(
+            project, paper,
+            idempotency_key=self.url_request_key(
+                project.id, paper.id, source_url),
+            source_kind=source_kind,
+            source_url=source_url,
+            file_name=self.url_file_name(paper.id, source_url),
+        )
+        version = self.claim_build(job, source_url)
+        return job, created, version
 
     def request_key(self, project_id: int, paper_id: int, source_identity: str) -> str:
         return f"{project_id}:{paper_id}:{source_identity}"
@@ -92,12 +136,22 @@ class IngestionService:
 
     # -- global build claim / reuse (Tasks 4.1) ------------------------------
 
-    def claim_build(self, job: PaperIngestionJob, source_identity: str) -> PaperIndexVersion:
+    def claim_build(self, job: PaperIngestionJob, source_identity: str,
+                    *, expected_execution: tuple[int, str] | None = None,
+                    ) -> PaperIndexVersion:
         """Get-or-create the GLOBAL build version for (paper, source).
 
         The version identity is (paper, source_sha256, pipeline_signature) —
         deterministic and model-free — so every project job attached to this
         build (and every redelivery) references the SAME non-null version.
+
+        P2-GLM-01-CX-02 fencing: when ``expected_execution`` (job_id,
+        token) is supplied, the lease fence, the version get-or-create AND
+        the job→version attachment all happen inside ONE transaction that
+        holds the job row lock from ``assert_execution_owner`` (token +
+        non-terminal + unexpired lease). No check-then-write gap remains:
+        an expired/stale worker raises before any version row is created
+        or attached.
         """
         from rag.embedding import embedding_metadata
 
@@ -106,37 +160,54 @@ class IngestionService:
         # and deterministic (hash of the build key).
         pipeline = f"ingest-build:{_digest(self.build_key(job.paper_id, source_identity), 24)}"
         src_sha = _digest(source_identity)
-        for _ in range(3):
-            try:
-                version, _created = PaperIndexVersion.objects.get_or_create(
-                    paper=job.paper,
-                    source_sha256=src_sha,
-                    pipeline_signature=pipeline,
-                    defaults={
-                        "status": "building",
-                        "parser_identity": self.PARSER_IDENTITY,
-                        "chunk_config_hash": self.CHUNK_CONFIG_HASH,
-                        "embedding_model": str(meta["embedding_model"]),
-                        "embedding_version": str(meta["embedding_version"]),
-                        "embedding_dim": int(meta["embedding_dim"]),
-                    },
-                )
-                break
-            except IntegrityError:
-                continue
-        else:  # pragma: no cover - 3 races is effectively impossible
-            version = PaperIndexVersion.objects.get(
+
+        def _get_or_create() -> PaperIndexVersion:
+            # get_or_create uses its own inner savepoint, so the retry
+            # loop is safe inside the caller's fence transaction
+            for _ in range(3):
+                try:
+                    version, _created = PaperIndexVersion.objects.get_or_create(
+                        paper=job.paper,
+                        source_sha256=src_sha,
+                        pipeline_signature=pipeline,
+                        defaults={
+                            "status": "building",
+                            "parser_identity": self.PARSER_IDENTITY,
+                            "chunk_config_hash": self.CHUNK_CONFIG_HASH,
+                            "embedding_model": str(meta["embedding_model"]),
+                            "embedding_version": str(meta["embedding_version"]),
+                            "embedding_dim": int(meta["embedding_dim"]),
+                        },
+                    )
+                    return version
+                except IntegrityError:
+                    continue
+            return PaperIndexVersion.objects.get(  # pragma: no cover
                 paper=job.paper, source_sha256=src_sha,
                 pipeline_signature=pipeline)
-        if job.index_version_id != version.id:
-            job.index_version = version
-            job.save(update_fields=["index_version", "updated_at"])
+
+        def _attach(version: PaperIndexVersion) -> None:
+            if job.index_version_id != version.id:
+                job.index_version = version
+                job.save(update_fields=["index_version", "updated_at"])
+
+        if expected_execution is not None:
+            from api.ingestion_execution import assert_execution_owner
+            with transaction.atomic():
+                assert_execution_owner(*expected_execution)
+                version = _get_or_create()
+                _attach(version)
+            return version
+
+        version = _get_or_create()
+        _attach(version)
         return version
 
     # -- short activation transaction (Task 4.3) -----------------------------
 
     def activate(
-        self, paper_id: int, version_id: int, expected_chunks: int
+        self, paper_id: int, version_id: int, expected_chunks: int,
+        *, expected_execution: tuple[int, str] | None = None,
     ) -> PaperIndexVersion:
         """Lock paper + version, verify persisted chunks, supersede the old
         active row and activate exactly ONE new version.
@@ -147,9 +218,18 @@ class IngestionService:
         no-op path in the caller. Any verification failure raises a STABLE
         message (never raw values) and the previous active version stays
         untouched (rollback boundary — old index keeps serving).
+
+        P2-GLM-01 fencing: with ``expected_execution`` (job_id, token) the
+        same short transaction first locks and verifies the execution lease
+        row — a stale worker raises ExecutionLeaseLost BEFORE any index
+        mutation, with no race window between check and commit.
         """
         with transaction.atomic():
             from papers.models import Paper
+
+            if expected_execution is not None:
+                from api.ingestion_execution import assert_execution_owner
+                assert_execution_owner(*expected_execution)
 
             paper_row = Paper.objects.select_for_update().get(id=paper_id)
             version = PaperIndexVersion.objects.select_for_update().get(

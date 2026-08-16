@@ -86,3 +86,35 @@ class EventPublisher:
                 payload=safe_payload,
             )
         return {"event": event_type, "data": safe_payload}
+
+    def publish_with_key(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        dedupe_key: str = "",
+        persist: bool | None = None,
+    ) -> dict[str, Any]:
+        """Idempotent variant (Task 4.5): persists the event with a stable
+        per-run dedupe key. A duplicate delivery of the same key within the
+        run is silently suppressed (converge, never duplicate).
+
+        The dedupe key MUST be derived from stable run identity + stable
+        phase (e.g. ``run:{id}:rag_committed``); it must never contain
+        question, payload or free text.
+        """
+        safe_payload = sanitize_event(event_type, payload, ids=self._ids)
+        should_persist = self.persist if persist is None else persist
+        if should_persist and safe_payload and dedupe_key:
+            from api.models import ProjectRunEvent
+
+            lookup = {"event_type": event_type, "dedupe_key": dedupe_key}
+            if self.run is not None:
+                lookup["run"] = self.run
+            else:
+                lookup["run_id"] = self.run_id
+            ProjectRunEvent.objects.get_or_create(
+                **lookup, defaults={"payload": safe_payload})
+        elif should_persist and safe_payload:
+            return self.publish(event_type, payload, persist=persist)
+        return {"event": event_type, "data": safe_payload}
