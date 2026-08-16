@@ -19,10 +19,26 @@
   compare per-paper obligations and hard-negative/scope controls.
 - [ ] 2.3 Validate every referenced PDF, active chunk hash, page/section and label; reject empty positives,
   duplicate cases, split overlap and labels that resolve only by metadata or stale versions.
-- [ ] 2.4 Store labels only under gitignored `docs/internal/phase3-hybrid-retrieval/held-out/`; publish to
+- [ ] 2.4 Store labels only under gitignored
+  `docs/internal/phase3-hybrid-retrieval/held-out-preregistration/`; publish to
   Codex a SHA-256, paper/case/category counts and schema version without revealing labels to DS.
 - [ ] 2.5 Submit exactly four sections (`已实现`, `原始证据`, `完整测试`, `仍未完成`) and stop. Tables may
   only supplement the prose case matrix.
+
+### Codex Preregistration Review Ledger
+
+- [ ] P3-PREREG-CX-01: Correct the stale-trap exclusion entry so the active source and superseded
+  source each bind to their actual PDF SHA-256 while the manifest still contains exactly fourteen
+  distinct paper identities.
+- [ ] P3-PREREG-CX-02: Recompute paper-split overlap from the final twelve held-out plus two trap
+  identities, preserve a sealed legacy/smoke universe snapshot or digest evidence, and remove the
+  obsolete pre-replacement candidate list as the source of the PASS claim.
+- [ ] P3-PREREG-CX-03: Make the sealed verifier truly read-only and extend runtime/offline checks to
+  bind accepted PDF bytes, canonical content hashes, page-or-section anchors, active/superseded
+  versions, parser/chunker identity and real BGE-M3 dense/sparse index facts.
+- [ ] P3-PREREG-CX-04: Generate a final detached artifact manifest after verifier and mutation output,
+  report mutations separately from the read-only proof, and require all summary claims to recompute
+  from the sealed artifacts without trusting stored PASS fields.
 
 ## 3. DS Batch A — Red Tests And Baseline
 
