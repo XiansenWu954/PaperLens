@@ -42,6 +42,15 @@ durable lifecycle state and safe events.
 - **THEN** it MUST record a terminal timestamp and stable error code when applicable
 - **AND** the parent run MUST track the latest terminal timestamp across its dependencies.
 
+#### Scenario: Keep ingestion execution ownership private
+
+- **WHEN** a project ingestion job is claimed, heartbeated, recovered or terminalized
+- **THEN** its execution token, heartbeat and execution-lease expiry MUST remain server-internal
+- **AND** serializers, API responses, events, logs, checkpoints and Celery result payloads MUST NOT
+  expose those fields
+- **AND** terminalization MUST clear the execution lease without changing the immutable active-index
+  contract.
+
 #### Scenario: Record deduplicated event
 
 - **WHEN** a workflow emits a node, wait, resume, retrieval, completion or failure event

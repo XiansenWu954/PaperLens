@@ -6,7 +6,9 @@ defineProps<{ runs: ProjectRun[] }>()
 const statusLabels: Record<ProjectRun['status'], string> = {
   pending: '排队',
   running: '运行中',
+  waiting_ingestion: '等待全文入库',
   done: '完成',
+  partial: '部分完成',
   error: '失败',
 }
 
@@ -16,6 +18,31 @@ function summarize(payload: Record<string, unknown>) {
     .slice(0, 4)
     .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.length : String(value)}`)
   return pairs.join(' · ')
+}
+
+function formatPhase(phase?: string) {
+  if (!phase) return ''
+  return phase
+}
+
+function dependencySummaryText(run: ProjectRun) {
+  const s = run.dependency_summary
+  if (!s) return ''
+  const parts = [`共 ${s.total}`]
+  if (s.succeeded) parts.push(`成功 ${s.succeeded}`)
+  if (s.failed) parts.push(`失败 ${s.failed}`)
+  if (s.unavailable) parts.push(`不可用 ${s.unavailable}`)
+  if (s.pending) parts.push(`等待 ${s.pending}`)
+  return parts.join(' · ')
+}
+
+function evidenceGaps(run: ProjectRun) {
+  const s = run.dependency_summary
+  if (!s) return []
+  const gaps: string[] = []
+  if (s.failed) gaps.push(`${s.failed} 篇全文入库失败`)
+  if (s.unavailable) gaps.push(`${s.unavailable} 篇无可入库全文`)
+  return gaps
 }
 
 function formatDate(value: string) {
@@ -49,9 +76,26 @@ function formatDate(value: string) {
           <strong>#{{ run.id }} · {{ run.kind }}</strong>
           <p>{{ run.question || 'No question' }}</p>
           <small>{{ formatDate(run.created_at) }} · {{ run.events.length }} events</small>
+          <small v-if="run.workflow_phase" class="run-phase">
+            阶段：{{ formatPhase(run.workflow_phase) }}
+            <template v-if="run.resume_count"> · 恢复 {{ run.resume_count }} 次</template>
+          </small>
+          <small v-if="dependencySummaryText(run)" class="run-deps">
+            依赖：{{ dependencySummaryText(run) }}
+          </small>
+          <p v-if="evidenceGaps(run).length" class="run-gaps">
+            证据缺口：{{ evidenceGaps(run).join('；') }}
+          </p>
           <p v-if="run.status === 'error' && run.error_message" class="run-error">
             失败原因：{{ run.error_message }}
           </p>
+          <a
+            v-if="run.report_id"
+            class="report-link"
+            :href="`/projects/${run.project}/reports`"
+          >
+            查看报告 #{{ run.report_id }}
+          </a>
         </div>
         <span :class="['status', run.status]">{{ statusLabels[run.status] || run.status }}</span>
       </header>
@@ -142,8 +186,44 @@ li small,
   color: var(--ok);
 }
 
+.status.waiting_ingestion {
+  color: var(--warn, #b8860b);
+}
+
+.status.partial {
+  color: var(--warn, #b8860b);
+}
+
 .status.error {
   color: var(--err);
+}
+
+.run-phase,
+.run-deps {
+  display: block;
+  margin-top: 2px;
+}
+
+.run-gaps {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border: 1px solid #e7d4ab;
+  border-radius: var(--radius-sm);
+  background: rgba(231, 212, 171, 0.18);
+  color: var(--warn, #8a6d1a);
+  font-size: 12px;
+}
+
+.report-link {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--accent, #4a7dbe);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.report-link:hover {
+  text-decoration: underline;
 }
 
 .run-error {

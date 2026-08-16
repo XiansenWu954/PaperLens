@@ -41,6 +41,22 @@ MUST 保持 deterministic router + bounded ReAct Harness，不得仅为工具路
 - **THEN** periodic reconciliation MUST request the same idempotent ingestion job again
 - **AND** the request MUST converge on the existing project job and global build.
 
+#### Scenario: In-progress ingestion worker is lost
+
+- **GIVEN** a workflow dependency is pending and its ingestion job has begun a non-terminal attempt
+- **WHEN** the Celery worker disappears before the job reaches `embedded` or `failed`
+- **THEN** a private database execution lease MUST expire without relying on broker visibility timeout
+- **AND** periodic reconciliation MUST redispatch the same idempotent ingestion job within one
+  execution-lease plus one Beat interval
+- **AND** a live worker MUST renew the lease so a long-running valid parse is not treated as orphaned
+- **AND** ownership at every durable boundary MUST require both the expected token and an unexpired
+  execution lease in the same database transaction as the protected write
+- **AND** an expired worker MUST NOT renew or clear its old lease, change job or run state, create or
+  attach a build, write chunks, activate an index, publish events or terminalize the job even when
+  its token has not yet been replaced
+- **AND** a voluntary retry handoff MUST remain recoverable when its retry publication is lost
+- **AND** duplicate delivery MUST still converge on one active build and one dependency terminal state.
+
 #### Scenario: 单一执行 owner
 
 - **WHEN** 相同 ProjectRun 被并发启动、恢复、重投或由 reconciliation 再次发现
@@ -74,6 +90,8 @@ MUST 保持 deterministic router + bounded ReAct Harness，不得仅为工具路
 - **WHEN** 用户提出普通项目问答、检索、列表、比较或单次工具动作
 - **THEN** 请求 MUST 使用 deterministic router + bounded ReAct Harness
 - **AND** LangGraph MUST NOT be required solely to route or execute that request.
+
+## ADDED Requirements
 
 ### Requirement: Durable workflow checkpoint safety
 

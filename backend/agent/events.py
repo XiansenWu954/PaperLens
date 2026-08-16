@@ -257,6 +257,16 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         "status": "text"}},
     "workflow_failed": {"fields": {
         "message": "error_code", "error_hash": "text"}},
+    # Task 4.3/4.5 (Batch C): waiting + committed RAG — allowlisted IDs,
+    # statuses, counts, phase and stable codes only.
+    "workflow_waiting": {"fields": {
+        "phase": "text", "status": "text"}},
+    # P2-C-R2-03 (Batch C): resume marker — IDs/status/phase only.
+    "workflow_resumed": {"fields": {
+        "phase": "text", "status": "text", "run_id": "int_or_none"}},
+    "rag_committed": {"fields": {
+        "phase": "text", "node": "text", "status": "text",
+        "evidence_count": "int_or_none"}},
     "workflow_node": {"fields": {
         "node": "text", "status": "text", "paper_count": "int_or_none",
         "added_count": "int_or_none", "job_count": "int_or_none",

@@ -360,19 +360,16 @@ async def add_papers_to_project(project_id: int, papers: list[dict], reason: str
             if len(queued) >= 3:
                 deferred.append({**entry, "reason": "queue_limit"})
                 continue
-            # scoped job get-or-create + global build claim + Celery enqueue;
-            # the file_name is a SAFE digest name — never derived from the
-            # raw URL path (Tasks5-CX-07)
+            # P2-C-R3-02: scoped job get-or-create + global build claim +
+            # Celery enqueue through the SINGLE canonical IngestionService
+            # URL entry — request key, safe digest file name and build
+            # identity are derived from one contract shared with the URL
+            # API and the durable workflow (Tasks5-CX-07).
             try:
-                job, _job_created = service.get_or_create_job(
-                    project, paper,
-                    idempotency_key=service.request_key(
-                        project.id, paper.id, _digest_source(pdf_url)),
-                    source_kind="agent",
-                    source_url=pdf_url,
-                    file_name=f"paper-{paper.id}-{_digest_source(pdf_url)[:8]}.pdf",
+                job, _job_created, _version = service.enqueue_url_job(
+                    project=project, paper=paper,
+                    source_url=pdf_url, source_kind="agent",
                 )
-                service.claim_build(job, _digest_source(pdf_url))
                 from api.tasks import ingest_paper_pdf_task
 
                 try:
@@ -473,11 +470,22 @@ async def project_paper_ids(project_id: int) -> list[int]:
     return await sync_to_async(ProjectScopeResolver(project_id).paper_ids)()
 
 
-async def query_project_rag(project_id: int, question: str, k: int = 6) -> dict[str, Any]:
+async def query_project_rag(project_id: int, question: str, k: int = 6,
+                            paper_ids: list[int] | None = None) -> dict[str, Any]:
+    """Query project-scoped hybrid RAG.
+
+    ``paper_ids`` (P2-D-CX-01) restricts the evidence scope to an explicit
+    subset (e.g. the workflow's ready/succeeded dependency papers). None
+    keeps the full project evidence scope; [] yields an explicit empty
+    scope (fail closed).
+    """
     from rag.models import Text
 
     resolver = ProjectScopeResolver(project_id)
-    paper_ids = await sync_to_async(resolver.paper_ids)()
+    paper_ids = await sync_to_async(resolver.paper_ids)() \
+        if paper_ids is None else \
+        [pid for pid in paper_ids
+         if pid in await sync_to_async(resolver.paper_ids)()]
     if not paper_ids:
         return {"evidence": [], "fallback": "项目论文库为空。"}
 

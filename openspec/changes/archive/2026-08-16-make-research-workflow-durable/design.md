@@ -151,10 +151,43 @@ Add one Celery Beat service and a periodic task every 15 seconds. It selects bou
 - pending workflow runs that were created but not started.
 - workflow dependencies whose project ingestion job is still pending with no executed attempt after
   the enqueue grace period.
+- workflow dependencies whose non-terminal ingestion job lost its executing worker after an attempt
+  began, as proven by an expired database execution lease rather than status age alone.
 
 Rows are claimed with database locking and `skip_locked` where supported. Reconciliation may enqueue
 the existing idempotent ingestion job or a workflow resume task, but never fetches/parses/embeds or
-advances graph state itself. Its target is recovery within 30 seconds.
+advances graph state itself. Its target is to detect the missing wakeup and enqueue compensation
+within 30 seconds. Terminal completion is measured separately and may wait for the approved
+300-second owner lease to expire; it must still converge to a stable terminal state with ownership
+released.
+
+An ingestion attempt has a separate, private database execution identity from the workflow owner.
+`PaperIngestionJob` stores an execution token, heartbeat timestamp and execution-lease expiry. A
+worker claims the lease atomically, renews it at a measured interval while parsing/embedding and
+checks the same token before every durable index, activation, terminal-state or event side effect.
+Beat may redispatch an idempotent job only after that execution lease expires. A stale worker whose
+token no longer matches must exit without publishing, activating an index or terminalizing the job.
+The token and lease fields are internal and never enter API, events, logs, checkpoints or Celery
+result payloads. Status age alone is not evidence that a worker died because legitimate PDF parsing
+can be long-running.
+
+Token equality is necessary but not sufficient ownership evidence. Every heartbeat and durable
+side-effect fence MUST atomically require both the expected token and an execution-lease expiry later
+than the database transaction's current time. An expired attempt cannot revive its own lease, clear
+the expired evidence, create or attach a build, change job/run state, persist chunks, activate an
+index, publish an event or terminalize the job before a replacement worker claims it. The ownership
+check and protected write MUST share one transaction and job-row lock; check-then-write across
+separate transactions is not fencing. A voluntary transient-retry handoff must leave enough persisted
+state for reconciliation to recover a lost retry publication without relying on broker visibility
+timeout.
+
+The default execution lease is 60 seconds and the default heartbeat interval is 10 seconds, exposed
+as `PAPERLENS_INGESTION_EXECUTION_LEASE_SECONDS` and
+`PAPERLENS_INGESTION_HEARTBEAT_SECONDS`. Validation requires positive values and heartbeat strictly
+below the lease. With the existing 15-second Beat interval, the fault gate derives its maximum
+compensating redispatch latency from runtime configuration as lease + Beat interval + 5 seconds of
+scheduler tolerance; it must not hardcode a passing duration. These settings affect attempt recovery
+only and do not replace the 300-second workflow owner lease.
 
 Alternative rejected: immediate events only, because a transaction can commit successfully while
 broker publication fails, leaving a durable run with no future wakeup.
@@ -194,6 +227,34 @@ it with a verified PostgreSQL fixture. Disabled mode rejects new starts and leav
 inspectable; it never invokes the legacy graph. Rollback deploys previous code only after disabling
 new starts and draining or marking active durable runs with a stable operator code. Checkpoint tables
 are retained for audit.
+
+### 11. Make independent acceptance artifacts self-contained and quiescent
+
+An independent acceptance package is a release artifact, not a pointer to a still-running test
+environment. Its verifier MUST derive every verdict from immutable files in the fixed artifact
+directory. It MUST NOT call Docker, Redis, PostgreSQL, a temporary script or another live service
+while verifying an already captured package. Runtime queries used during execution are written to
+scenario-specific JSON or raw logs first, and the detached artifact manifest is generated last.
+
+Runtime provenance is collected from the containers that actually execute the accepted scenarios.
+Python package versions use distribution metadata rather than module `__version__` attributes;
+PostgreSQL extension versions use a successfully parsed database query. Missing, blank or
+unparseable required versions fail the package. At minimum the package records PostgreSQL, pgvector,
+Redis, Celery, LangGraph, `langgraph-checkpoint-postgres`, `psycopg-pool`, the embedding provider and
+eager/non-eager mode.
+
+Acceptance ends only after a bounded quiescence check. The Celery queue depth and Redis transport
+`unacked` state MUST both reach zero after the tested workflows are terminal and workers have had a
+bounded drain interval. A nonzero value is not automatically a product defect, but it blocks a clean
+`PASS` artifact until every message is decoded to task name/ID and associated run/job, its idempotent
+terminal behavior is proven, and a final zero-state snapshot is captured. Restarting workers for
+that drain check must not create another report, RAG commit, active build or terminal event.
+
+Negative controls use explicit timestamps and authoritative terminal states. Ambiguous booleans such
+as `still_waiting` are not accepted when their value or name conflicts with the prose claim. The
+verifier must reject missing scenario files, missing runtime fields, non-quiescent broker state,
+duplicate report summary blocks and any report/JSON mismatch. Evidence-only corrections do not
+authorize production changes or rerunning already accepted long fault matrices.
 
 ## Risks / Trade-offs
 

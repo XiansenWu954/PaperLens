@@ -509,27 +509,22 @@ def project_paper_ingest(request, project_id: int, paper_id: int):
     if not source_url:
         return Response({"error": "论文没有可入库的 pdf_url"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Tasks5-CX-01: URL ingest goes through IngestionService like upload —
-    # scoped request key, job get-or-create, global build claim. Source
-    # identity in keys/logs is a DIGEST, never the raw URL. The actual safe
-    # download stays in the worker (SafePdfFetcher).
-    import hashlib
-
+    # Tasks5-CX-01 + P2-C-R3-02: URL ingest goes through the SINGLE
+    # canonical IngestionService URL entry — scoped request key, safe digest
+    # file name, global build claim all derive from one identity contract
+    # (same as Agent auto-queue and the durable workflow). Source identity
+    # in keys/logs is a DIGEST, never the raw URL. The actual safe download
+    # stays in the worker (SafePdfFetcher).
     from .ingestion_service import IngestionService
 
-    digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:64]
     service = IngestionService()
-    job, created = service.get_or_create_job(
-        link.project,
-        link.paper,
-        idempotency_key=service.request_key(project_id, paper_id, digest),
-        source_kind="url",
+    digest = service.canonical_url_identity(source_url)
+    job, created, version = service.enqueue_url_job(
+        project=link.project,
+        paper=link.paper,
         source_url=source_url,
-        file_name=f"paper-{paper_id}-{digest[:8]}.pdf",
+        source_kind="url",
     )
-    # source identity for the GLOBAL build is the raw URL — claim_build digests
-    # it internally, exactly like the worker does (Tasks5-CX-01)
-    version = service.claim_build(job, source_url)
     if version.status == "active":
         # Tasks5-CX-01: reuse the active global build — no enqueue/parse/write
         job.status = "embedded"
@@ -847,6 +842,22 @@ def project_research_expand_workflow(request, project_id: int):
     project = ResearchProject.objects.filter(id=project_id).first()
     if not project:
         return Response({"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND)
+    # Task 4.6: durable-workflow flag OR checkpointer readiness failure ->
+    # stable fail-closed workflow_unavailable. No run, no enqueue, no legacy
+    # one-shot graph.
+    from config.health import durable_workflow_health
+
+    health = durable_workflow_health()
+    if not health["durable_workflow_available"]:
+        logger.warning(
+            "research expansion workflow unavailable",
+            extra={"event": "workflow_unavailable",
+                   "project_id": project.id,
+                   "enabled": health["durable_workflow_enabled"],
+                   "checkpointer_ready": health["workflow_checkpointer_ready"],
+                   "status": 503})
+        return Response({"error": "workflow_unavailable"},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
     question = (request.data.get("question") or "").strip()
     if not question:
         return Response({"error": "question 不能为空"}, status=status.HTTP_400_BAD_REQUEST)

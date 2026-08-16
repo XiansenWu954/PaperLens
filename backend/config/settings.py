@@ -78,6 +78,7 @@ INSTALLED_APPS = [
     'api',
     'realtime',
     'eval',
+    'config',
 ]
 
 # ASGI application（Daphne 接管 runserver 的关键）
@@ -202,6 +203,13 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0") == "1" or IS_TESTING
 CELERY_TASK_EAGER_PROPAGATES = True
+# Batch D Task 5.2: stateless 15-second workflow reconciliation (enqueue-only).
+CELERY_BEAT_SCHEDULE = {
+    "reconcile-workflow-runs-every-15s": {
+        "task": "api.reconcile_workflow_runs",
+        "schedule": 15.0,
+    },
+}
 
 PAPERLENS_EMBEDDING_PROVIDER = os.environ.get("PAPERLENS_EMBEDDING_PROVIDER", "bge-m3")
 PAPERLENS_EMBEDDING_MODEL = os.environ.get("PAPERLENS_EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -214,6 +222,28 @@ PAPERLENS_EMBEDDING_VERSION = os.environ.get(
     "PAPERLENS_EMBEDDING_VERSION",
     f"{PAPERLENS_EMBEDDING_MODEL}:dim{PAPERLENS_EMBEDDING_DIM}:norm",
 )
+def _default_durable_workflow():
+    """P2-B-CX-02: durable workflow defaults ON only for PostgreSQL.
+    Explicit env var always wins. SQLite fallback defaults OFF."""
+    if os.environ.get("PAPERLENS_DURABLE_WORKFLOW_ENABLED") is not None:
+        return os.environ["PAPERLENS_DURABLE_WORKFLOW_ENABLED"] == "1"
+    # Default by database engine: PostgreSQL ON, SQLite OFF
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url.startswith("postgres://") or db_url.startswith("postgresql://"):
+        return True
+    return False
+
+PAPERLENS_DURABLE_WORKFLOW_ENABLED = _default_durable_workflow()
+
+# P2-GLM-01: private ingestion execution lease (attempt-recovery fencing
+# only — it never replaces the 300s workflow owner lease). Validation
+# (positive values, heartbeat strictly below lease) happens at use time in
+# api.ingestion_execution so misconfiguration fails closed.
+PAPERLENS_INGESTION_EXECUTION_LEASE_SECONDS = int(
+    os.environ.get("PAPERLENS_INGESTION_EXECUTION_LEASE_SECONDS", "60"))
+PAPERLENS_INGESTION_HEARTBEAT_SECONDS = int(
+    os.environ.get("PAPERLENS_INGESTION_HEARTBEAT_SECONDS", "10"))
+
 PAPERLENS_RAG_DENSE_K = int(os.environ.get("PAPERLENS_RAG_DENSE_K", "20"))
 PAPERLENS_RAG_LEXICAL_K = int(os.environ.get("PAPERLENS_RAG_LEXICAL_K", "20"))
 PAPERLENS_RAG_FINAL_K = int(os.environ.get("PAPERLENS_RAG_FINAL_K", "8"))

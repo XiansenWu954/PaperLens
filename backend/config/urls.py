@@ -34,8 +34,18 @@ def health(request):
     )
 
 
+def workflow_health(request):
+    """P2-B-CX-02: durable workflow health.
+
+    Reports durable_workflow_enabled and workflow_checkpointer_ready.
+    Never exposes DSN, host, user, password, or table content."""
+    from config.health import durable_workflow_health
+    return JsonResponse(durable_workflow_health())
+
+
 urlpatterns = [
     path("", health, name="health"),
+    path("health/workflow", workflow_health, name="workflow_health"),
     path("api/", include("api.urls")),
     path("admin/", admin.site.urls),
 ]

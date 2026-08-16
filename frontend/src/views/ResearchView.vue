@@ -14,11 +14,13 @@ const copyError = ref('')
 const activePanel = ref<'report' | 'graph'>('report')
 
 const statusLabel = computed(() => {
-  const labels = {
+  const labels: Record<string, string> = {
     idle: '待机',
     pending: '排队中',
     running: '研究中',
+    waiting_ingestion: '等待全文入库',
     done: '完成',
+    partial: '部分完成',
     error: '出错',
   }
   return labels[store.status] || store.status
