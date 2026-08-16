@@ -35,10 +35,14 @@
   obsolete pre-replacement candidate list as the source of the PASS claim.
 - [ ] P3-PREREG-CX-03: Make the sealed verifier truly read-only and extend runtime/offline checks to
   bind accepted PDF bytes, canonical content hashes, page-or-section anchors, active/superseded
-  versions, parser/chunker identity and real BGE-M3 dense/sparse index facts.
+  versions and parser/chunker identity. Record real BGE-M3 dense facts and the expected pre-fix empty
+  sparse baseline separately; non-empty sparse weights become a Batch B and fixed-revision gate.
 - [ ] P3-PREREG-CX-04: Generate a final detached artifact manifest after verifier and mutation output,
   report mutations separately from the read-only proof, and require all summary claims to recompute
   from the sealed artifacts without trusting stored PASS fields.
+- [x] P3-SPEC-CX-01: Promote the discovered real-provider document sparse wiring gap into the Phase 3
+  capability and design contracts: one-call document dense+sparse encoding, immutable versioned
+  rebuild, explicit dense-only compatibility and no migration backfill.
 
 ## 3. DS Batch A — Red Tests And Baseline
 
@@ -46,6 +50,9 @@
   relevant FTS-only chunk is outside dense Top-K; require non-empty dense controls and exact expected IDs.
 - [ ] 3.2 Add red tests for three independent candidate lists, pre-fusion union, weighted contributions,
   stable ties, empty/unavailable routes and invalid plan values.
+- [ ] 3.2a Add red tests proving real-provider document ingestion calls combined dense+sparse encoding
+  once, rejects empty/malformed sparse batches, never mutates an existing active version and creates a
+  distinct building identity instead of reusing a dense-only active version.
 - [ ] 3.3 Add PostgreSQL and Python-fallback red tests for own active positive evidence and foreign,
   excluded, unlinked, empty, building, superseded, failed and stale negatives on every route.
 - [ ] 3.4 Add compare red tests proving each validated target receives a separate Top-3 plan and one
@@ -61,8 +68,9 @@
 
 - [ ] 4.1 Add immutable plan/candidate/result/trace structures and an `execute_retrieval` core while
   preserving the existing list-returning wrapper and call signatures.
-- [ ] 4.2 Add one-call BGE-M3 dense+sparse query encoding and deterministic provider-unavailable behavior;
-  offline tests must use fake/local providers and make zero model-network calls.
+- [ ] 4.2 Add one-call BGE-M3 dense+sparse query and document encoding, sparse-batch validation,
+  sparse-capable build identity and deterministic provider-unavailable behavior; offline tests must
+  use fake/local providers and make zero model-network calls.
 - [ ] 4.3 Implement independent PostgreSQL dense, FTS and sparse routes with shared fail-closed scope and
   active-compatible-index predicates; sparse MUST search beyond dense candidates.
 - [ ] 4.4 Add the non-atomic concurrent JSONB `jsonb_ops` GIN migration plus forward/backward and row/
@@ -108,7 +116,9 @@
 ## 7. DS Batch E — Fixed-revision Validation
 
 - [ ] 7.1 On one fixed revision, run Docker PostgreSQL/pgvector with real BGE-M3 and prove three
-  independent routes, GIN-backed sparse candidate selection and deterministic weighted fusion.
+  independent routes, versioned reindexing of the fixed PDF sets, non-empty finite document sparse
+  weights, GIN-backed sparse candidate selection and deterministic weighted fusion. Resolve sealed
+  labels by paper plus canonical content hash in the new active version, not preregistration row IDs.
 - [ ] 7.2 Run smoke plus dev/calibration three times; record all route metrics, warmed p50/p95, model
   invocation counts, index plan, memory/runtime provenance and stability deltas.
 - [ ] 7.3 Run complete backend, Stage B, Phase 1, Phase 2, migration drift, Django check, frontend

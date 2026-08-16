@@ -74,6 +74,35 @@ single retrieval plan.
 - **THEN** they MUST use fake or explicitly local providers
 - **AND** no model download or external network call is permitted.
 
+### Requirement: Versioned BGE-M3 document modalities
+
+BGE-M3 document ingestion MUST produce dense vectors and sparse lexical weights together and MUST
+publish them through the existing immutable versioned-index lifecycle.
+
+#### Scenario: Build a sparse-ready document version
+
+- **WHEN** a BGE-M3 document batch is encoded for a building index version
+- **THEN** dense vectors and sparse lexical weights MUST come from one provider invocation
+- **AND** cardinality, dense dimension, finite values and non-empty finite sparse maps MUST validate
+  before any chunk is persisted
+- **AND** the sparse-capable pipeline identity MUST prevent reuse of a dense-only active version as a
+  completed sparse-ready build.
+
+#### Scenario: Preserve a published dense-only version
+
+- **GIVEN** a published active version predates sparse document encoding and has empty sparse maps
+- **WHEN** Phase 3 prepares sparse-ready evidence
+- **THEN** the published version MUST NOT be updated in place
+- **AND** a new building version MUST be written and atomically activated through `IngestionService`
+- **AND** failure MUST leave the previous active version queryable.
+
+#### Scenario: Sparse evidence is not ready
+
+- **WHEN** an otherwise eligible active version has missing, empty, malformed or non-finite document
+  sparse weights
+- **THEN** dense and FTS routes MAY remain available
+- **AND** the sparse route MUST report `unavailable` and return no fabricated sparse candidates.
+
 ### Requirement: Indexed sparse retrieval
 
 Production PostgreSQL sparse retrieval MUST use the existing JSONB sparse-weight representation with
@@ -85,6 +114,7 @@ an indexable token-key prefilter and exact weighted scoring over eligible matche
 - **THEN** it MUST create a `jsonb_ops` GIN index concurrently without rewriting or deleting Text or
   PaperIndexVersion rows
 - **AND** reversing the migration MUST remove only that index.
+- **AND** index creation MUST NOT mutate or backfill any published chunk or index version.
 
 #### Scenario: Bound query terms
 

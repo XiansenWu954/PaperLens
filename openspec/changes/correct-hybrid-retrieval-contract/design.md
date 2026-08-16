@@ -6,17 +6,23 @@ list. That implementation cannot retrieve an item outside dense Top-K and does n
 independent retrieval signals. It also returns only `Text` rows, discarding route raw scores and
 fusion contributions needed to diagnose quality.
 
-The existing `Text.sparse_weights` JSONB field already stores BGE-M3 lexical token weights. BGE-M3
-supports dense and sparse retrieval from one model, PostgreSQL `jsonb_ops` GIN supports top-level key
-existence, and RRF combines independently ranked lists without requiring score calibration. The
-smallest production-aligned change is therefore an indexed independent sparse route over the current
-field, not a new vector database or a normalized posting service.
+The existing `Text.sparse_weights` JSONB field can store BGE-M3 lexical token weights, but the frozen
+baseline does not populate it for the real BGE-M3 provider: document ingestion probes for
+`encode_sparse()` while the provider exposes `encode_dense_sparse()`. The held-out preregistration
+confirmed that all 565 baseline chunks have valid dense vectors and empty sparse maps. Phase 3 must
+therefore repair document-time dense+sparse encoding and create new versioned indexes before an
+independent sparse route can be evaluated. BGE-M3 supports both modalities from one model,
+PostgreSQL `jsonb_ops` GIN supports top-level key existence, and RRF combines independently ranked
+lists without requiring score calibration. The production-aligned change remains the existing JSONB
+representation, not a new vector database or normalized posting service.
 
 ## Goals And Non-Goals
 
 Goals:
 
 - Make dense, FTS and BGE-M3 sparse genuinely independent scoped recall routes.
+- Populate document dense vectors and sparse lexical weights in one BGE-M3 invocation and publish
+  them through the existing immutable building-to-active index lifecycle.
 - Preserve active-index, project-scope, evidence and event-safety invariants.
 - Make candidate generation and fusion deterministic and diagnosable without exposing query text or
   full text outside the in-memory retrieval boundary.
@@ -58,6 +64,20 @@ The embedding provider gains one internal query-modality operation. BGE-M3 obtai
 representations in one model invocation. Providers without sparse capability return dense plus an
 explicit unavailable sparse route. Tests use the fake provider and MUST NOT download a model.
 
+### Document encoding and version transition
+
+BGE-M3 document ingestion uses the provider's combined dense+sparse operation once per chunk batch.
+Cardinality, dense dimension, finite dense values and non-empty finite sparse maps are validated
+before any chunk is persisted. A sparse-capable pipeline identity participates in build identity so
+an existing dense-only active version cannot be silently reused as a Phase 3 sparse-ready version.
+
+Phase 1 immutability remains frozen: existing active rows and their empty sparse maps are never
+updated in place. Reindexing writes a new building version through `IngestionService`, validates the
+whole version, then atomically activates it while preserving the old active version until commit.
+GIN-index creation does not backfill sparse values. Until a paper has a current active version whose
+eligible chunks contain valid sparse maps, dense and FTS remain available and the sparse route reports
+`unavailable`; it must not pretend that an empty map is a successful sparse route.
+
 ### Independent routes
 
 All routes use the same fail-closed scope predicate:
@@ -76,7 +96,8 @@ chunk and never derives sparse candidates from dense results.
 
 The migration uses PostgreSQL `AddIndexConcurrently` with `atomic = False`. SQLite receives no index
 operation. Migration tests cover forward/backward behavior and preserve existing rows and active
-versions.
+versions. The migration does not mutate or backfill published index rows; document sparse population
+occurs only through the versioned ingestion path.
 
 ### Weighted RRF
 
@@ -137,10 +158,12 @@ quality verdict. Gold-v2 contains thirty real CS papers over six topics and 120 
 abbreviation, 12 cross-language, 12 author/year, 20 compare and 10 hard-negative or scope cases.
 
 Each positive label records paper identity, canonical chunk content hash, page/section and a relevance
-grade from zero to three. Compare labels contain an obligation for every target paper. Dev and
-calibration annotations may be used by DS. Before implementation tuning, a separate GLM session
-creates the held-out labels in a gitignored sealed artifact; Codex records only its SHA-256 and schema
-manifest in the implementation handoff.
+grade from zero to three. A preregistration index ID is provenance, not the durable label identity:
+after versioned reindexing, evaluators resolve the same paper and canonical content hash against the
+current active-compatible version and fail closed if it is absent or changed. Compare labels contain
+an obligation for every target paper. Dev and calibration annotations may be used by DS. Before
+implementation tuning, a separate GLM session creates the held-out labels in a gitignored sealed
+artifact; Codex records only its SHA-256 and schema manifest in the implementation handoff.
 
 The evaluator reports route-specific and hybrid Paper Recall@5, MRR, Context Precision@5, graded
 nDCG@5, compare obligation recall, scope leakage and warmed route/total latency. It runs three times
